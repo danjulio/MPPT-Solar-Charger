@@ -1,0 +1,64 @@
+
+#######################################
+# Syntax Coloring Map For mpptChg
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+mpptChg		KEYWORD1
+mpptChg_sys_t	KEYWORD1
+mpptChg_val_t	KEYWORD1
+mpptChg_cfg_t	KEYWORD1
+
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+begin			KEYWORD2
+getStatusValue		KEYWORD2
+getIndexedValue		KEYWORD2
+getConfigurationValue	KEYWORD2
+setConfigurationValue	KEYWORD2
+getWatchdogEnable	KEYWORD2
+setWatchdogEnable	KEYWORD2
+setWatchdogTimeout	KEYWORD2
+getWatchdogTimeout	KEYWORD2
+isAlert			KEYWORD2
+isNight			KEYWORD2
+
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+MPPT_CHG_ID_BRD_ID_MASK		LITERAL1
+MPPT_CHG_ID_MAJ_REV_MASK	LITERAL1
+MPPT_CHG_ID_MIN_REV_MASK	LITERAL1
+
+MPPT_CHG_STATUS_HW_WD_MASK	LITERAL1
+MPPT_CHG_STATUS_SW_WD_MASK	LITERAL1
+MPPT_CHG_STATUS_BAD_BATT_MASK	LITERAL1
+MPPT_CHG_STATUS_EXT_MISS_MASK	LITERAL1
+MPPT_CHG_STATUS_WD_RUN_MASK	LITERAL1
+MPPT_CHG_STATUS_PWR_EN_MASK	LITERAL1
+MPPT_CHG_STATUS_ALERT_MASK	LITERAL1
+MPPT_CHG_STATUS_PCTRL_MASK	LITERAL1
+MPPT_CHG_STATUS_T_LIM_MASK	LITERAL1
+MPPT_CHG_STATUS_NIGHT_MASK	LITERAL1
+MPPT_CHG_STATUS_CHG_ST_MASK	LITERAL1
+
+MPPT_CHG_ST_NIGHT		LITERAL1
+MPPT_CHG_ST_IDLE		LITERAL1
+MPPT_CHG_ST_VSRCV		LITERAL1
+MPPT_CHG_ST_SCAN		LITERAL1
+MPPT_CHG_ST_BULK		LITERAL1
+MPPT_CHG_ST_ABSORB		LITERAL1
+MPPT_CHG_ST_FLOAT		LITERAL1
+
+MPPT_CHG_BUCK_PWM_MASK		LITERAL1
+MPPT_CHG_BUCK_LIM2_MASK		LITERAL1
+MPPT_CHG_BUCK_LIM1_MASK		LITERAL1
+
