@@ -1,0 +1,1 @@
+g++ -o test_i2c test_i2c.c mpptChg.cpp -I ./ -I /usr/local/include -l wiringPi
