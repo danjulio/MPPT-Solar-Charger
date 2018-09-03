@@ -24,6 +24,11 @@ The ```mpptChgD``` daemon provides the following functionality.
     # Start the charger daemon
     /usr/local/bin/mpptChgD -d -f /home/pi/mpptChgDconfig.txt &
     ```
+5. For Raspberry Pi: The I2C interface on all Pi versions has a bug that causes it to fail when the I2C slave stretches the clock (the MPPT Solar Charger stretches the clock slightly).  A work-around is to reduce the I2C clock rate to 50 kHz that can be done by adding the following line to the ```/boot/config.txt``` file.
+
+    ```
+    dtparam=i2c_arm_baudrate=50000
+    ```
 
 ### Operation
 The program may be run from the command line without the ```-d``` option for testing or when executed by a user-application.  The program will not run as a daemon without the option.
