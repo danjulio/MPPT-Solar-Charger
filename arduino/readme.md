@@ -12,4 +12,6 @@ This directory contains a simple Arduino library providing access the the MPPT S
 ![OLED backside](pictures/oled_back.png)
 
 ### Linux Example
-The linux directory contains a simple example using the library on a Raspberry Pi.  Put the source in the same directory as the library files and use the command line in the 'm' file to compile.  It assumes wiringPi has been installed.
+The linux directory contains a simple example using the library on a Raspberry Pi.  Put the source in the same directory as the library files and use the command line in the 'm' file to compile.  It assumes wiringPi has been installed. I just ```chmod +x m``` and compile using ```./m``` in the same directory as the source files.
+
+Run the the demo program ```./test_i2c```.
