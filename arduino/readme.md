@@ -15,3 +15,10 @@ This directory contains a simple Arduino library providing access the the MPPT S
 The linux directory contains a simple example using the library on a Raspberry Pi.  Put the source in the same directory as the library files and use the command line in the 'm' file to compile.  It assumes wiringPi has been installed. I just ```chmod +x m``` and compile using ```./m``` in the same directory as the source files.
 
 Run the the demo program ```./test_i2c```.
+
+Note that the I2C interface on all Pi versions has a bug that causes it to fail when the I2C slave stretches the clock (the MPPT Solar Charger stretches the clock slightly).  A work-around is to reduce the I2C clock rate to 50 kHz that can be done by adding the following line to the ```/boot/config.txt``` file.
+
+  ```
+  dtparam=i2c_arm_baudrate=50000
+  ```
+  
