@@ -149,7 +149,7 @@ typedef enum
 } mpptChg_val_t;
 
 //
-// Signed 16-bit configuration parameters (although they are always postive)
+// Signed 16-bit configuration parameters (although they are always positive)
 //
 typedef enum
 {
