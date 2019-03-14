@@ -16,7 +16,7 @@
  * to be enabled on the Raspberry Pi.  Also uses Ben Hoyt's inih.c library for
  * parsing commands and the config file (included).
  *
- * Copyright (c) 2018 Dan Julio (dan@danjuliodesigns.com)
+ * Copyright (c) 2018-2019 Dan Julio (dan@danjuliodesigns.com)
  *
  * Author's note: Yeah, I know this has grown into a big ole' hack.  It should be 
  * refactored, etc, etc.  Were there more hours in the day...
@@ -62,7 +62,7 @@
 //
 
 #define VERSION_MAJOR       0
-#define VERSION_MINOR       4
+#define VERSION_MINOR       5
 
 #define MPPT_CHG_I2C_ADDR   0x12
 
@@ -458,6 +458,17 @@ bool CheckAlertStatus(bool* alert)
 
 	if (ReadCharger("STATUS", &s)) {
 		*alert = ((s & STATUS_ALERT_MASK) == STATUS_ALERT_MASK);
+
+		// Handle a special case where we have on very infrequent occasion
+		// seen a response of 0xFFFF for the read.  This could cause us to shutdown
+		// the host without the charger cycling power which results in a hung system
+		// (host won't ever reboot).  So we check again just to be sure.
+		if (*alert) {
+			(void) ReadCharger("STATUS", &s);
+			if ((s & STATUS_ALERT_MASK) == 0) {
+				*alert = false;
+			}
+		}
 		return true;
 	} else {
 		*alert = false;
@@ -1060,7 +1071,7 @@ int main(int argc, char *argv[])
 				}
 			}
 			if (config.enLogging) {
-			if (--logTimeout == 0) {
+				if (--logTimeout == 0) {
 					logTimeout = config.logDelay;
 					if (!LogValues(&prev_time)) {
 						goto err_exit;
