@@ -6,7 +6,7 @@
 ### Contents
 This repository contains documentation and software for the MPPT Solar Charger board (design documented at [hackaday.io](https://hackaday.io/project/161351-solar-mppt-charger-for-247-iot-devices)).  
 
-1. hardware - Board documentation and schematic
+1. hardware - Board documentation, schematic and connection diagrams for different uses
 2. arduino - Arduino library and examples (can be compiled with wiringPi for Raspberry Pi too)
 3. mppt_dashboard - Mac OS, Windows and Linux monitoring application that communicates with the charger via the mpptChgD daemon
 4. mpptChgD - Linux Daemon compiled for Raspberry Pi that communicates with the charger via I2C
@@ -27,7 +27,7 @@ The MPPT Solar Charger is a combination solar battery charger and 5V power suppl
 * Watchdog functionality to power-cycle connected device if it crashes
 
 ### Applications
-* Remote control and sense applications* Solar powered web cam* Night-time “critter” cam* Solar powered LED night lighting controller
+* Remote control and sense applications* Solar powered web or timelapse camera* Night-time “critter cam"* Solar powered LED night lighting controller
 
 #### Bonus Application
 The charger works well as a 12- and/or 5-V UPS when combined with a laptop power supply.  The laptop supply should be able to supply at least 3.5A at between 18.5 - 21V output (for example a Dell supply at 20V/3.5A) - a high enough voltage to initiate charging.  The charger will both charge the battery and supply the load current to the user's device and the battery will supply power if AC power fails.
