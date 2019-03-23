@@ -32,6 +32,17 @@ The MPPT Solar Charger is a combination solar battery charger and 5V power suppl
 #### Bonus Application
 The charger works well as a 12- and/or 5-V UPS when combined with a laptop power supply.  The laptop supply should be able to supply at least 3.5A at between 18.5 - 21V output (for example a Dell supply at 20V/3.5A) - a high enough voltage to initiate charging.  The charger will both charge the battery and supply the load current to the user's device and the battery will supply power if AC power fails.
 
+### Compatible Solar Panels and Batteries
+The MPPT Solar Charger is designed to use standard 25- or 35-Watt 12V solar panels with AGM type 7-Ah to 18-Ah 12V lead acid batteries. It has a maximum charge capacity of about 35-38 watts. A detailed sizing method is described in the user manual but it is possible to use smaller or larger panels and batteries depending on the application.
+
+Typically a 25-Watt panel is paired with a 7-Ah battery for small systems (Arduino-type up to Raspberry Pi Zero type). A 35-Watt panel is paired with 9-Ah to 18-Ah batteries for larger systems. Larger batteries provide longer run-time during poor (lower light) charging conditions. A larger panel can provide more charge current during poor charging conditions.
+
+Solar panels should be a 36-cell type with a typical maximum power-point of around 18V and maximum open-circuit voltage of 23V. Available panels and batteries I have tested with are shown below.
+
+* [25 Watt Panel](https://www.amazon.com/gp/product/B014UND3LA)
+* [35 Watt Panel](https://www.amazon.com/gp/product/B01G1II6LY)
+* [9 Ah Battery](https://www.amazon.com/Power-Sonic-PS-1290-Rechargeable-Battery-Terminals/dp/B002L6R130)
+* [18 Ah Battery](https://www.amazon.com/ExpertPower-EXP12180-Rechargeable-Battery-Bolts/dp/B00A82A3RK)
 
 ### Questions?
 
