@@ -1,5 +1,5 @@
 # motioneyeos with mpptChgD daemon
-Calin Crisan's exellent [motioneyeos](https://github.com/ccrisan/motioneyeos) is a complete Linux distribution that turns a Linux SBC like the Raspberry Pi into a highly functional webcam.  He provides excellent instructions for installation and configuration; some are referenced here.  These instructions also show how to include and configure the charger daemon for a system based on a Raspberry Pi that fully integrates the charger with a web cam based on motioneyeos.
+Calin Crisan's exellent [motioneyeos](https://github.com/ccrisan/motioneyeos) is a complete Linux distribution that turns a Linux SBC like the Raspberry Pi into a highly functional webcam.  He provides detailed instructions for installation and configuration; some are referenced here.  These instructions also show how to include and configure the charger daemon for a system based on a Raspberry Pi that fully integrates the charger with a web cam based on motioneyeos.
 
 
 ![Running for the first time](pictures/first_run.png)
@@ -7,11 +7,16 @@ Calin Crisan's exellent [motioneyeos](https://github.com/ccrisan/motioneyeos) is
 Running for the first time in the lab (note the charged battery!)
 
 ## Hardware configuration
-In addition to the solar charger, battery and solar panel you will need the following components.
+In addition to the solar charger you will need the following components.
 
-1. Supported single board computer (SBC) with camera (see Calin's repository for a list).
-2. Micro-SD Card (8 GB - or larger - gives plenty of room to store images and video)
-3. Four wires or jumpers connecting the charger's +5, Ground, SDA and SCL lines to the SBC.
+1. 12V 36-cell Solar Panel. 35W recommended for Pi 3, 25W recommended for Pi Zero.
+2. 12V AGM Battery.  9-12 Ah recommended for Pi 3, 7 Ah recommended for Pi Zero.
+3. Supported single board computer (SBC) with camera (see Calin's repository for a list).
+4. Micro-SD Card (8 GB - or larger - gives plenty of room to store images and video)
+5. 18 AWG or larger hook-up wire with terminals to connect solar panel and battery to charger.
+6. Four wires or hook-up jumpers connecting the charger's +5, Ground, SDA and SCL lines to the SBC (28 AWG or larger).
+
+![Connection Diagram](pictures/pi_cam_connection_diagram.png)
 
 ## motioneyeos installation
 
