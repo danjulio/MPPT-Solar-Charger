@@ -1,0 +1,136 @@
+# mpptChgD configuration file
+#
+# Configure the following optional functions:
+#   1. Auto shutdown enable
+#   2. TCP Access
+#   3. Charger register value Logging
+#   4. Charger configuration parameters
+#   5. Watchdog enable
+#
+# All options shown below. Uncomment to enable. Configuration items have the form
+# <ITEM>=<VALUE> where <VALUE> may be an integer or string value.  Items that are
+# used to enable functionality (such as SHUTDOWN below) may either be commented out
+# or set to 0 to disable.  Uncomment them and set the value to 1 to enable.
+#
+# Comments are indicated by a '#' or ';' character in the first position.
+#
+
+# ==========================================================================================
+#
+# Automatic Low Battery shutdown.  Uncomment the following line to enable a controlled
+# OS shutdown upon detection of an imminent power down due to low battery.
+SHUTDOWN=1
+
+
+# ==========================================================================================
+#
+# Remote TCP access.  Uncomment and set the TCP_PORT to a non-zero number to enable
+# TCP access to the daemon.  Remember that this may introduce security risks to your
+# system.
+TCP_PORT=23000
+# Maximum number of simultaneous TCP connections (default is 1 connection, maximum 4)
+TCP_MAX=1
+
+
+# ==========================================================================================
+#
+# Logging parameters
+#
+# Configure the logfile
+#LOG_FILE=/data/log/mpptChgDlog.txt
+#
+# Number of seconds between log entries
+#LOG_DELAY=60
+#
+# Log items.  Uncomment charger register values you wish to log.  A comment is written
+# to the log file indicating the items being logged and their order.  Items that are not
+# enabled are skipped.  See the user manual for an explanation of each register.  Values
+# are logged as base-10 decimal numbers separated by a space character.
+#
+# ID Register
+#LOG=ID
+#
+# STATUS Register
+#LOG=STATUS
+#
+# BUCK Status Register
+#LOG=BUCK
+#
+# Solar Panel Voltage in mV (VS)
+#LOG=VS
+#
+# Solar Panel Current in mA (IS)
+#LOG=IS
+#
+# Battery Voltage in mV (VB)
+#LOG=VB
+#
+# Battery Load Current in mA (IB)
+#LOG=IB
+#
+# Battery Charge Current in mA (IC)
+#LOG=IC
+#
+# Internal Temperature Sensor temperature in degrees C x 10 (IT) - (25C will show up as 250)
+#LOG=IT
+#
+# External Temperature Sensor temperature in degrees C x 10 (ET)
+#LOG=ET
+#
+# Current calculated solar panel maximum power point voltage in mV (VM)
+#LOG=VM
+#
+# Current temperature compensated battery charge voltage in mV (TH)
+#LOG=TH
+#
+# Battery BULK/ABSORPTION charge voltage threshold for 25C in mV (BULKV)
+#LOG=BULKV
+#
+# Battery FLOAT charge voltage threshold for 25C in mV (FLOATV)
+#LOG=FLOATV
+#
+# Low Battery power-off threshold in mV (PWROFFV)
+#LOG=PWROFFV
+#
+# Battery power-on restart threshold in mV (PWRONV)
+#LOG=PWRONV
+#
+# Watchdog enable Register (0=disabled, 1=enabled)(WDEN)
+#LOG=WDEN
+#
+# Watchdog timeout count Register in seconds (WDCNT)
+#LOG=WDCNT
+
+
+# ==========================================================================================
+#
+# Charger parameters.  Uncomment the following lines to configure non-default charger
+# configuration parameters.
+#
+# Battery BULK/ABSORPTION charge voltage threshold for 25C in mV (BULKV)
+#  Must be within the range 14000 - 15000 mV
+#BULKV=14700
+#
+# Battery FLOAT charge voltage threshold for 25C in mV (FLOATV)
+#  Must be within the range 13000 - 14000 mV
+#FLOATV=13650
+#
+# Low Battery power-off threshold in mV  (PWROFFV)
+#  Must be within the range 11000 - 12000 mV
+#PWROFFV=11500
+#
+# Battery power-on restart threshold in mV  (PWRONV)
+#  Must be within the range 12000 - 13000 mV
+#PWRONV=12500
+
+
+# ==========================================================================================
+#
+# Watchdog Enable.  Uncomment the following line to enable the daemon to control the charger's
+# watchdog mechanism.  It will enable the watchdog functionality and make sure that it is
+# updated in order to not cycle power.  The daemon will catch most terminal signals and
+# automatically disable the watchdog before exiting.  However a hard kill of the daemon will
+# leave the watchdog running and unless it is disabled via another facility, the charger will
+# power cycle the system within 120 - 180 seconds.
+#WATCHDOG=1
+
