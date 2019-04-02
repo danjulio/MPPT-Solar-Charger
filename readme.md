@@ -13,7 +13,7 @@ This repository contains documentation and software for the MPPT Solar Charger b
 
 The MPPT Solar Charger is a combination solar battery charger and 5V power supply for IOT-class devices designed for 24/7 operation off of solar power. It manages charging a 12V AGM lead acid battery from common 36-cell 12V solar panels.  It provides 5V power output at up to 2A for systems that include sensors or communication radios.  Optimal charging is provided through a dynamic perturb-and-observe maximum power-point transfer converter (MPPT) and a 3-stage (BULK, ABSORPTION, FLOAT) charging algorithm.  A removable temperature sensor provides temperature compensation.  Operation is plug&play although additional information and configuration may be obtained through a digital interface.
 
-* Optimized for commonly available batteries in the 7-18 AHr range and solar panels in the 10-35 Watt range
+* Optimized for commonly available batteries in the 7-18 Ah range and solar panels in the 10-35 Watt range
 * Reverse Polarity protected solar panel input with press-to-open terminal block
 * Fused battery input with press-to-open terminal block
 * Maximum 2A at 5V output on USB Type A power output jack and solder header
@@ -43,6 +43,19 @@ Solar panels should be a 36-cell type with a typical maximum power-point of arou
 * [35 Watt Panel](https://www.amazon.com/gp/product/B01G1II6LY)
 * [9 Ah Battery](https://www.amazon.com/Power-Sonic-PS-1290-Rechargeable-Battery-Terminals/dp/B002L6R130)
 * [18 Ah Battery](https://www.amazon.com/ExpertPower-EXP12180-Rechargeable-Battery-Bolts/dp/B00A82A3RK)
+
+### Enclosures
+
+I have used the [Carlon E989N](https://www.homedepot.com/p/Carlon-8-in-x-4-in-PVC-Junction-Box-E989N-CAR/100404099) enclosure found at a Home Depot home improvement store to hold the battery, charger and single-board computer.  It is a good size providing room for a 7- or 9-Ah battery as well as room for heat dissipation from both the charger and computer.  Note that the charger can dissipate upwards of 5W when running at full capacity.
+
+Other possible enclosures include the following.  I haven't yet tested them but are available through normal distribution channels like Mouser.
+
+* Hammond Manufacturing [RP1465/RP1465C](https://www.hammfg.com/electronics/small-case/plastic/rp)
+* Bud Industries [PIP-11774/PIP-11774-C](https://www.budind.com/view/NEMA+Boxes/NEMA+4X+-+PIP)
+
+
+
+
 
 ### Questions?
 
