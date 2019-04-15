@@ -1,4 +1,4 @@
-## MPPT Solar Charger Daemon
+## makerPower™ MPPT Solar Charger Daemon
 
 Building and running the daemon requires [wiringPi](http://wiringpi.com/download-and-install/) to be installed.  The 'm' file contains the command line to compile it.  I just ```chmod +x m``` and compile using ```./m``` in the same directory as the source files.
 

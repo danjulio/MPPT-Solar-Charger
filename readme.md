@@ -1,17 +1,17 @@
-## MPPT Solar Charger
+## makerPower™ MPPT Solar Charger
 
 ![MPPT Solar Charger](hardware/pictures/35_00082_02.png)
 
 
 ### Contents
-This repository contains documentation and software for the MPPT Solar Charger board (design documented at [hackaday.io](https://hackaday.io/project/161351-solar-mppt-charger-for-247-iot-devices)).  
+This repository contains documentation and software for the makerPower MPPT Solar Charger board (design documented at [hackaday.io](https://hackaday.io/project/161351-solar-mppt-charger-for-247-iot-devices)).  
 
 1. hardware - Board documentation, schematic and connection diagrams for different uses
 2. arduino - Arduino library and examples (can be compiled with wiringPi for Raspberry Pi too)
 3. mppt_dashboard - Mac OS, Windows and Linux monitoring application that communicates with the charger via the mpptChgD daemon
 4. mpptChgD - Linux Daemon compiled for Raspberry Pi that communicates with the charger via I2C
 
-The MPPT Solar Charger is a combination solar battery charger and 5V power supply for IOT-class devices designed for 24/7 operation off of solar power. It manages charging a 12V AGM lead acid battery from common 36-cell 12V solar panels.  It provides 5V power output at up to 2A for systems that include sensors or communication radios.  Optimal charging is provided through a dynamic perturb-and-observe maximum power-point transfer converter (MPPT) and a 3-stage (BULK, ABSORPTION, FLOAT) charging algorithm.  A removable temperature sensor provides temperature compensation.  Operation is plug&play although additional information and configuration may be obtained through a digital interface.
+The makerPower is a combination solar battery charger and 5V power supply for IOT-class devices designed for 24/7 operation off of solar power. It manages charging a 12V AGM lead acid battery from common 36-cell 12V solar panels.  It provides 5V power output at up to 2A for systems that include sensors or communication radios.  Optimal charging is provided through a dynamic perturb-and-observe maximum power-point transfer converter (MPPT) and a 3-stage (BULK, ABSORPTION, FLOAT) charging algorithm.  A removable temperature sensor provides temperature compensation.  Operation is plug&play although additional information and configuration may be obtained through a digital interface.
 
 * Optimized for commonly available batteries in the 7-18 Ah range and solar panels in the 10-35 Watt range
 * Reverse Polarity protected solar panel input with press-to-open terminal block
@@ -33,7 +33,7 @@ The MPPT Solar Charger is a combination solar battery charger and 5V power suppl
 The charger works well as a 12- and/or 5-V UPS when combined with a laptop power supply.  The laptop supply should be able to supply at least 3.5A at between 18.5 - 21V output (for example a Dell supply at 20V/3.5A) - a high enough voltage to initiate charging.  The charger will both charge the battery and supply the load current to the user's device and the battery will supply power if AC power fails.
 
 ### Compatible Solar Panels and Batteries
-The MPPT Solar Charger is designed to use standard 25- or 35-Watt 12V solar panels with AGM type 7-Ah to 18-Ah 12V lead acid batteries. It has a maximum charge capacity of about 35-38 watts. A detailed sizing method is described in the user manual but it is possible to use smaller or larger panels and batteries depending on the application.
+The makerPower is designed to use standard 25- or 35-Watt 12V solar panels with AGM type 7-Ah to 18-Ah 12V lead acid batteries. It has a maximum charge capacity of about 35-38 watts. A detailed sizing method is described in the user manual but it is possible to use smaller or larger panels and batteries depending on the application.
 
 Typically a 25-Watt panel is paired with a 7-Ah battery for small systems (Arduino-type up to Raspberry Pi Zero type). A 35-Watt panel is paired with 9-Ah to 18-Ah batteries for larger systems. Larger batteries provide longer run-time during poor (lower light) charging conditions. A larger panel can provide more charge current during poor charging conditions.
 

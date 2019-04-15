@@ -1,5 +1,5 @@
 # motioneyeos with mpptChgD daemon
-Calin Crisan's exellent [motioneyeos](https://github.com/ccrisan/motioneyeos) is a complete Linux distribution that turns a Linux SBC like the Raspberry Pi into a highly functional webcam.  He provides detailed instructions for installation and configuration; some are referenced here.  These instructions also show how to include and configure the charger daemon for a system based on a Raspberry Pi that fully integrates the charger with a web cam based on motioneyeos.
+Calin Crisan's excellent [motioneyeos](https://github.com/ccrisan/motioneyeos) is a complete Linux distribution that turns a Linux SBC like the Raspberry Pi into a highly functional webcam.  He provides detailed instructions for installation and configuration; some are referenced here.  These instructions also show how to include and configure the charger daemon for a system based on a Raspberry Pi that fully integrates the charger with a web cam based on motioneyeos.
 
 
 ![Running for the first time](pictures/first_run.png)
@@ -7,7 +7,7 @@ Calin Crisan's exellent [motioneyeos](https://github.com/ccrisan/motioneyeos) is
 Running for the first time in the lab (note the charged battery!)
 
 ## Hardware configuration
-In addition to the solar charger you will need the following components.
+In addition to the makerPower™ solar charger you will need the following components.
 
 1. 12V 36-cell Solar Panel. 35W recommended for Pi 3, 25W recommended for Pi Zero.
 2. 12V AGM Battery.  9-12 Ah recommended for Pi 3, 7 Ah recommended for Pi Zero.
@@ -49,7 +49,7 @@ Use ```ssh``` to login to the motioneyeos system: ```ssh root@<IP ADDRESS>```.  
 2. Copy the following files into ```/data/mpptChg``` (using ```scp``` if they are located on another system).
  * ```mpptChgD```
  * ```libwiringPi.so.X.Y``` (where "X.Y" are the version found here)
- * ```mpptChgDconfig.txt``` (by default this enables network access and low-battery shutdown.  Optinally, you can also enable it to log data to ```/data/log/mpptChgDlog.txt``` and/or enable the watchdog function if you want to power cycle the Pi if it crashes).
+ * ```mpptChgDconfig.txt``` (by default this enables network access and low-battery shutdown.  Optionally, you can also enable it to log data to ```/data/log/mpptChgDlog.txt``` and/or enable the watchdog function if you want to power cycle the Pi if it crashes).
 3. Create a soft link, in the ```/data/mpptChg``` directory, to the wiringPi library: ```ln -s libwiringPi.so.X.Y libwiringPi.so```
 
 4. Copy the ```userinit.sh``` file from this repository to ```/data/etc/userinit.sh```.  This file will start the daemon each time the system is rebooted.

@@ -1,8 +1,8 @@
-## MPPT Solar Charger Arduino Library
+## makerPower™ Arduino Library
 
 ![OLED Solar Monitor](pictures/lib_oled_test.png)
 
-This directory contains a simple Arduino library providing access the the MPPT Solar Charger via I2C and a couple of simple example sketches.  The library can also be compiled on a Raspberry Pi (requires [wiringPi](http://wiringpi.com/download-and-install/)).
+This directory contains a simple Arduino library providing access the makerPower via I2C and a couple of simple example sketches.  The library can also be compiled on a Raspberry Pi (requires [wiringPi](http://wiringpi.com/download-and-install/)).
 
 ### Sample Sketches
 
@@ -16,7 +16,7 @@ The linux directory contains a simple example using the library on a Raspberry P
 
 Run the the demo program ```./test_i2c```.
 
-Note that the I2C interface on all Pi versions has a bug that causes it to fail when the I2C slave stretches the clock (the MPPT Solar Charger stretches the clock slightly).  A work-around is to reduce the I2C clock rate to 50 kHz that can be done by adding the following line to the ```/boot/config.txt``` file.
+Note that the I2C interface on all Pi versions has a bug that causes it to fail when the I2C slave stretches the clock (the makerPower stretches the clock slightly).  A work-around is to reduce the I2C clock rate to 50 kHz that can be done by adding the following line to the ```/boot/config.txt``` file.
 
   ```
   dtparam=i2c_arm_baudrate=50000
