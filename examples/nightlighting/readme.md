@@ -32,7 +32,7 @@ The MOSFET is not super-critical in this application.  It should be able to be f
 
 ![Lit 12V LED Strip](pictures/strip_lit.png)
 
-Most 12V LED strips can be cut every 3 LEDs.  Current consumption - and therefore required battery capacity - is computed by the number of 3 LED segments multiplied by the current required by one segment.  Current required by segment depends on the type of LED used in the strip but variers, in my experience, from less than 20 mA for 3528 LEDs to 60 mA for 5050 and 5630 LEDs.  The 5 segment (15 LED) waterproof strip in my photograph requires about 80 mA at 12.5 volts.  It would match well with a 20-25 W Solar Panel and 7 Ah battery.  The system would normally have a very low nightly discharge from the battery resulting in long battery life and the capability of operation for up to a week in low-light conditions (e.g. snow covered solar panels).
+Most 12V LED strips can be cut every 3 LEDs.  Current consumption - and therefore required battery capacity - is computed by the number of 3 LED segments multiplied by the current required by one segment.  Current required by segment depends on the type of LED used in the strip but varies, in my experience, from less than 20 mA for 3528 LEDs to about 60 mA for 5050 and 5630 LEDs.  The 5 segment (15 LED) waterproof strip in my photograph requires about 80 mA at 12.5 volts.  It would match well with a 20-25 W Solar Panel and 7 Ah battery.  The system would normally have a very low nightly discharge from the battery resulting in long battery life and the capability of operation for up to a week in low-light conditions (e.g. snow covered solar panels).
 
 ![Lit Solid State Depot Sign](pictures/ssd_lit_sign.png)
 
