@@ -75,6 +75,22 @@ bool mpptChg::begin()
 }
 
 
+#ifdef ESP8266
+bool mpptChg::begin(int sda, int sck)
+{
+	if (alertPin != -1) {
+		pinMode(alertPin, INPUT);
+	}
+	if (nightPin != -1) {
+		pinMode(nightPin, INPUT);
+	}
+
+	Wire.begin(sda, sck);
+	return(true);
+}
+#endif
+
+
 bool mpptChg::getStatusValue(mpptChg_sys_t index, uint16_t* val)
 {
 	uint8_t reg;

@@ -2,7 +2,7 @@
 
 ![OLED Solar Monitor](pictures/lib_oled_test.png)
 
-This directory contains a simple Arduino library providing access the makerPower via I2C and a couple of simple example sketches.  The library can also be compiled on a Raspberry Pi (requires [wiringPi](http://wiringpi.com/download-and-install/)).
+This directory contains a simple Arduino library providing access the makerPower via I2C and a couple of simple example sketches.  It includes support for the ESP8266 software I2C implementation requiring specification of pins for SDA and SCL.  The library can also be compiled on a Raspberry Pi (requires [wiringPi](http://wiringpi.com/download-and-install/)).
 
 ### Sample Sketches
 

@@ -170,6 +170,9 @@ class mpptChg
 		mpptChg(int aPin);
 		mpptChg(int aPin, int nPin);
 		bool begin();
+#ifdef ESP8266
+		bool begin(int sda, int sck);
+#endif
 		bool getStatusValue(mpptChg_sys_t index, uint16_t* val);
 		bool getIndexedValue(mpptChg_val_t index, int16_t* val);
 		bool getConfigurationValue(mpptChg_cfg_t index, uint16_t* val);
