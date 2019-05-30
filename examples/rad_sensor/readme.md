@@ -1,4 +1,4 @@
-# Remote Sensing with DIYgeiger / Particle.io / Bylnk.io
+# Remote Sensing with DIYgeiger / Particle.io / Blynk.io
 The makerPower™ charger is the perfect power source for remote sensing applications and works well with [particle.io](https://www.particle.io/) development boards.  This example pairs a Particle Photon with the inexpensive but full-featured [DIYgieger GK-B5 Geiger Counter](https://sites.google.com/site/diygeigercounter/home/software-features) to remotely report radiation count-per-minute (CPM) and Dose information, along with battery voltage, load current and solar charging values on a smart phone using a free [Blynk](https://blynk.io/) account and the Blynk app.
 
 ![Mobile Blynk Display](pictures/blynk_app.png)
