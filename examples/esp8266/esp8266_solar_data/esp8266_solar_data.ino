@@ -16,7 +16,7 @@
  * 
  * You must have installed support for the esp8266 in the Arduino IDE.  In addition, you must have an account
  * at Adafruit (https://io.adafruit.com/).  Information about creating the dashboard is in the github respository
- * (https://github.com/danjulio/MPPT-Solar-Charger/tree/master/examples/motioneyeos).
+ * (https://github.com/danjulio/MPPT-Solar-Charger/tree/master/examples/esp8266).
  * 
  * This demo was tested on the Sparkfun ESP8266 WiFi Shield.  The built-in LED on pin 5 is used to indicate successful
  * connection to the local WiFi Network.  It may need to be changed for different esp8266 boards.
