@@ -5,7 +5,7 @@
  *
  * Compilation of platform dependent components keys on the "ARDUINO" define.
  *
- * Copyright (c) 2018 Dan Julio (dan@danjuliodesigns.com)
+ * Copyright (c) 2018-2019 Dan Julio (dan@danjuliodesigns.com)
  *
  * mpptChg is free software: you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published
@@ -237,6 +237,18 @@ bool mpptChg::setWatchdogTimeout(uint8_t val)
 bool mpptChg::getWatchdogTimeout(uint8_t* val)
 {
 	return(_Read8(MPPT_WD_COUNT, val));
+}
+
+
+bool mpptChg::setWatchdogPoweroff(uint16_t val)
+{
+	return(_Write16(MPPT_WD_PWROFF, val));
+}
+
+
+bool mpptChg::getWatchdogPoweroff(uint16_t* val)
+{
+	return(_Read16(MPPT_WD_PWROFF, val));
 }
 
 

@@ -114,5 +114,8 @@ LOG=TH
 # automatically disable the watchdog before exiting.  However a hard kill of the daemon will
 # leave the watchdog running and unless it is disabled via another facility, the charger will
 # power cycle the system within 120 - 180 seconds.
+#
+# Note that the existing WDPWROFF register value is used for the power-cycle time for board
+# firmware versions 1.2 forward.  By default this value is 10 seconds.
 #WATCHDOG=1
 
