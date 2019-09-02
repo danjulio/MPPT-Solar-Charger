@@ -11,6 +11,7 @@
  *     2. Missing External Temperature Sensor (3 blinks)
  *     3. Operating Temperature range currently exceeded (4 blinks)
  *
+ * Copyright (c) 2018-2019 danjuliodesigns, LLC.  All rights reserved.
  *
  * SolarMpptCharger is free software: you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published

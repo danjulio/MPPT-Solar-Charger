@@ -7,7 +7,7 @@
 // 12V AGM sealed lead acid batteries and power 5V-based devices
 // with an I2C interface and status signals.
 //
-// Copyright (c) 2018 danjuliodesigns, LLC.  All rights reserved.
+// Copyright (c) 2018-2019 danjuliodesigns, LLC.  All rights reserved.
 //
 // Implements the following functionality:
 //   1. MPPT Charge controller with 3 charge states:

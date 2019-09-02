@@ -6,6 +6,7 @@
  *  is interrupt driven by the SMBus peripheral with action taken based on
  *  current I2C access state.
  *
+ * Copyright (c) 2018-2019 danjuliodesigns, LLC.  All rights reserved.
  *
  * SolarMpptCharger is free software: you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published
