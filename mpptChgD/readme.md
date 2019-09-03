@@ -15,7 +15,7 @@ The ```mpptChgD``` daemon provides the following functionality.
 
 ### Installation
 
-1. Install and build [wiringPi](http://wiringpi.com/download-and-install/).
+1. Install and build [wiringPi](http://wiringpi.com/download-and-install/).  Note that wiringPi may be already installed on some distributions.
 2. Build the executable (or use the binary provided here.  You may have to chmod +x, etc).
 3. Copy the executable ```mpptChgD``` to a suitable location like ```/usr/local/bin```.
 4. Copy the configuration file somewhere that makes sense to you.  I put it in ```/home/pi/mpptChgDconfig.txt```.  Edit it to configure operation and logging as you desire.  The template file here should have adequate internal documentation to allow you to configure it as necessary.
@@ -90,7 +90,7 @@ The configuration file, specified with the ```-f <file>``` command line option, 
 1. Enable/Disable remote TCP access, specify the maximum number of supported simultaneous connections and the TCP port to bind to.  Note that there may be a security risk having an open port on the computer.
 2. Enable/Disable logging, specify the log interval (in seconds between samples) and the items to be logged.
 3. Change the default charger parameters for default Bulk charge threshold, Float charge threshold, low-battery power off and power on thresholds.
-4. Enable a watchdog function.  The daemon will enable the watchdog function on the charger and periodically update the WDCNT SMBus register to prevent the charger from power-cycling the computer.  Note that if the daemon is killed without disabling the watchdog function in the charger then the charger will power-cycle the computer.  User code can  write to the psuedo-tty to disable the watchdog function immediately after killing the daemon (```echo "WCNT=0" > /dev/mpptChg```).  If you are worried about a specific process failing and want to use the watchdog function to detect that then either the process needs to control the watchdog function or another script/program that is monitoring the process must control the watchdog function.
+4. Enable a watchdog function.  The daemon will enable the watchdog function on the charger, reset WDPWROFF to 10 seconds, and then periodically update the WDCNT SMBus register to prevent the charger from power-cycling the computer.  The daemon catches SIGINT, SIGHUP and SIGTERM and will attempt to disable the watchdog before terminating after receiving any of these signals.  However if the daemon may killed (SIGKILL or SIGSTOP) so that the watchdog function remains running in which case the computer will be power-cycled when it expires.  User code can  write to the psuedo-tty to disable the watchdog function immediately after killing the daemon in this case (```echo "WCNT=0" > /dev/mpptChg```).  If you are worried about a specific process failing and want to use the watchdog function to detect that then either the process needs to control the watchdog function or another script/program that is monitoring the process must control the watchdog function.
 
 ### Log File
 

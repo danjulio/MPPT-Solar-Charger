@@ -61,8 +61,8 @@
 // Constants
 //
 
-#define VERSION_MAJOR       0
-#define VERSION_MINOR       5
+#define VERSION_MAJOR       1
+#define VERSION_MINOR       0
 
 #define MPPT_CHG_I2C_ADDR   0x12
 
@@ -74,6 +74,7 @@
 
 #define WD_INIT_SECS        180
 #define WD_UPDATE_SECS      60
+#define WD_PWROFF_SECS      10
 #define WDEN_MAGIC_BYTE     0xEA
 
 #define PARAM_CHECK_SECS    300
@@ -86,7 +87,7 @@
 //
 // Commands
 //
-#define NUM_CMDS 18
+#define NUM_CMDS 19
 
 typedef struct {
 	const char* cName;
@@ -114,7 +115,8 @@ cmd_t cmdList[NUM_CMDS] = {
 	{"PWROFFV", true, true, false, 28},
 	{"PWRONV", true, true, false, 30},
 	{"WDEN", true, false, false, 33},
-	{"WDCNT", true, false, false, 35}
+	{"WDCNT", true, false, false, 35},
+	{"WDPWROFF", true, true, false, 36}
 };
 
 
@@ -431,6 +433,10 @@ bool EnableWatchdog()
 	}
 
 	if (!WriteCharger("WDCNT", WD_INIT_SECS)) {
+		return false;
+	}
+
+	if (!WriteCharger("WDPWROFF", WD_PWROFF_SECS)) {
 		return false;
 	}
 
