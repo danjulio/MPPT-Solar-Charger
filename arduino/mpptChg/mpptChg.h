@@ -16,7 +16,7 @@
  *
  * Compilation of platform dependent components keys on the "ARDUINO" define.
  *
- * Copyright (c) 2018-2019 Dan Julio (dan@danjuliodesigns.com)
+ * Copyright (c) 2018-2022 Dan Julio (dan@danjuliodesigns.com)
  *
  * mpptChg is free software: you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published
@@ -109,7 +109,7 @@
 //
 // Buck Status bit masks
 //
-#define MPPT_CHG_BUCK_PWM_MASK  0xFF00
+#define MPPT_CHG_BUCK_PWM_MASK  0xFFC0
 #define MPPT_CHG_BUCK_LIM2_MASK 0x0002
 #define MPPT_CHG_BUCK_LIM1_MASK 0x0001
 

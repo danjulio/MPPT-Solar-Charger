@@ -5,7 +5,7 @@
  *
  * Compilation of platform dependent components keys on the "ARDUINO" define.
  *
- * Copyright (c) 2018-2019 Dan Julio (dan@danjuliodesigns.com)
+ * Copyright (c) 2018-2022 Dan Julio (dan@danjuliodesigns.com)
  *
  * mpptChg is free software: you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published
