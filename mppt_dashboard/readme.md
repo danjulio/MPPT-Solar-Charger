@@ -10,16 +10,16 @@ The ```Builds``` directory contains the pre-compiled binaries for x86-64 Linux, 
 ### Linux
 The application is compiled for 64-bit systems supporting a graphic user interface such as Mint, Ubuntu or Debian.
 
-First make sure the binary, ```mppt_dashboard```, is executable with the appropriate permissions for the logged in user.
+You may have to make sure the binary, ```mppt_dashboard```, is executable with the appropriate permissions for the logged in user.
 
 	```chmod 755 mppt_dashboard```
 
 Then the program may be started, either from a command line in a terminal or usually by double-clicking it from a file viewer.
 
 ### Mac OS X
-The application should appear as a proper Macintosh application bundle that can be started by double-clicking the bundle icon.  There are both 32- and 64-bit versions.
+The 64-bit application should appear as a proper Macintosh application bundle that can be started by double-clicking the bundle icon.
 
 ### Windows
-The application is compiled as both a 32- and 64-bit version.
+The application is compiled as a 64-bit version.
 
 Use the file viewer to descend into the ```mppt_dashboard``` folder and then double-click the ```mppt_dashboard.exe``` file to start the application.
