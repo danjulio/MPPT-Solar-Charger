@@ -36,11 +36,11 @@
 //
 //   Period (in PCA clocks) = (256 x PCA0CPL2) + (256 - PCA0L)
 //
-// We choose a value of around 2.5 mSec (2.51 - 2.52 mSec) because this is
+// We choose a value of around 2.7 mSec (2.6645 - 2.6749 mSec) because this is
 // longer than the maximum measured time through the watchdog protected main
 // loop but still very short in real-time.
 //
-#define WD_PCA0CPL2_RELOAD 240
+#define WD_PCA0CPL2_RELOAD 255
 
 
 
@@ -54,7 +54,7 @@ extern bool WD_Detected;
 //-----------------------------------------------------------------------------
 // API Routines
 //-----------------------------------------------------------------------------
-void WD_Disable();
+//void WD_Disable();
 void WD_Init();
 void WD_Reset();
 

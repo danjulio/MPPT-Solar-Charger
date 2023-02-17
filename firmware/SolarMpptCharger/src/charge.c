@@ -13,7 +13,7 @@
  *     - Battery disconnect handling
  *     - Update SMBus registers with charge related values
  *
- * Copyright (c) 2018-2019 danjuliodesigns, LLC.  All rights reserved.
+ * Copyright (c) 2018-2023 danjuliodesigns, LLC.  All rights reserved.
  *
  * SolarMpptCharger is free software: you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published
@@ -220,6 +220,7 @@ void CHARGE_MpptUpdate() {
 
 
 void CHARGE_StateUpdate() {
+	bool b;
 	static uint8_t scanExitChargeState;  // Used to restore state after MPPT scan
 	int16_t t_c10;
 
@@ -245,12 +246,14 @@ void CHARGE_StateUpdate() {
 	t_c10 = TEMP_GetCurTempC10();
 	if (chargeTempLimited) {
 		// Look for temperature to return to within charging limits
-		if ((t_c10 < ((TEMP_LIMIT_HIGH - TEMP_LIMIT_HYST)*10)) && (t_c10 > (TEMP_LIMIT_LOW + TEMP_LIMIT_HYST)*10)) {
+		b = t_c10 > (PARAM_GetBattIsLeadAcid() ? (TEMP_LIMIT_LOW_1 + TEMP_LIMIT_HYST)*10 : (TEMP_LIMIT_LOW_2 + TEMP_LIMIT_HYST)*10);
+		if ((t_c10 < ((TEMP_LIMIT_HIGH - TEMP_LIMIT_HYST)*10)) && b) {
 			chargeTempLimited = false;
 		}
 	} else {
 		// Look for temperature outside of charging limits
-		if ((t_c10 > (TEMP_LIMIT_HIGH*10)) || (t_c10 < (TEMP_LIMIT_LOW*10))) {
+		b =  t_c10 < (PARAM_GetBattIsLeadAcid() ? TEMP_LIMIT_LOW_1*10 : TEMP_LIMIT_LOW_2*10);
+		if ((t_c10 > (TEMP_LIMIT_HIGH*10)) || b) {
 			chargeTempLimited = true;
 			if (!((chargeState == CHG_ST_NIGHT) || (chargeState == CHG_ST_IDLE))) {
 				_CHARGE_SetState(CHG_ST_IDLE);
@@ -323,7 +326,8 @@ void CHARGE_StateUpdate() {
 			// See if we can enter a charging state
 			if ((v_s_mv > V_MIN_GOOD_SOLAR) && (v_b_mv >= V_BAD_BATTERY) && !chargeTempLimited) {
 				_CHARGE_SetState(CHG_ST_SCAN);
-				if (v_b_mv < V_MIN_IDLE_2_FLT) {
+				b = v_b_mv < (PARAM_GetBattIsLeadAcid() ? V_MIN_IDLE_2_FLT_1 : V_MIN_IDLE_2_FLT_2);
+				if (b) {
 					scanExitChargeState = CHG_ST_BULK;
 				} else {
 					scanExitChargeState = CHG_ST_FLT;

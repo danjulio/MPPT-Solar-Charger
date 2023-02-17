@@ -11,7 +11,7 @@
  *     2. Missing External Temperature Sensor (3 blinks)
  *     3. Operating Temperature range currently exceeded (4 blinks)
  *
- * Copyright (c) 2018-2019 danjuliodesigns, LLC.  All rights reserved.
+ * Copyright (c) 2018-2023 danjuliodesigns, LLC.  All rights reserved.
  *
  * SolarMpptCharger is free software: you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published
@@ -169,12 +169,12 @@ void _LED_SetNormalState(uint8_t s)
 uint8_t _LED_ReturnCurNormalState()
 {
 	// Priority detection of normal operating states
-	if (POWER_LowBattDisabled()) {
-		return LED_ST_LOW_BATT;
-	} else if ((CHARGE_GetState() == CHG_ST_NIGHT) || (CHARGE_GetState() == CHG_ST_IDLE)) {
-		return LED_ST_IDLE_CHG;
-	} else {
+	if (CHARGE_GetState() > CHG_ST_IDLE) {
 		return LED_ST_CHARGE;
+	} else if (POWER_LowBattDisabled()) {
+		return LED_ST_LOW_BATT;
+	} else {
+		return LED_ST_IDLE_CHG;
 	}
 }
 

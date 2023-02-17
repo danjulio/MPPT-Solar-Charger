@@ -10,7 +10,7 @@
  *  3. Update SMBus registers with temperature sensor values and missing
  *     temperature sensor detection.
  *
- * Copyright (c) 2018-2019 danjuliodesigns, LLC.  All rights reserved.
+ * Copyright (c) 2018-2023 danjuliodesigns, LLC.  All rights reserved.
  *
  * SolarMpptCharger is free software: you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published
@@ -56,7 +56,7 @@ void TEMP_Init()
 
 void TEMP_Update()
 {
-	int32_t t;
+	int32_t t = 0;
 
 	// Update temperature values
 	TEMP_IntTempC10 = ADC_GetValue(ADC_MEAS_TI_INDEX);
@@ -80,18 +80,22 @@ void TEMP_Update()
 	//  by 100 to properly compute mV delta values.
 	//
 	// Evaluate temperature compensated charge voltage for FLOAT
-	t = ((int32_t) TEMP_CurTempC10 - 250) * V_FLOAT_COMP_X10;
-	if ((t % 100) >= 50) {
-		// Round up
-		t += 100;
+	if (PARAM_GetBattIsLeadAcid()) {
+		t = ((int32_t) TEMP_CurTempC10 - 250) * V_FLOAT_COMP_X10;
+		if ((t % 100) >= 50) {
+			// Round up
+			t += 100;
+		}
 	}
 	TEMP_compFloatMv = (uint16_t) ((int32_t) PARAM_GetFloatMv() + (t / 100));
 
 	// Evaluate temperature compensated charge voltage for BULK/ABS
-	t = ((int32_t) TEMP_CurTempC10 - 250) * V_BULK_COMP_X10;
-	if ((t % 100) >= 50) {
-		// Round up
-		t += 100;
+	if (PARAM_GetBattIsLeadAcid()) {
+		t = ((int32_t) TEMP_CurTempC10 - 250) * V_BULK_COMP_X10;
+		if ((t % 100) >= 50) {
+			// Round up
+			t += 100;
+		}
 	}
 	TEMP_compBulkMv = (uint16_t) ((int32_t) PARAM_GetBulkMv() + (t / 100));
 

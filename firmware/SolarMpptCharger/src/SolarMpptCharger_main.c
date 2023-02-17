@@ -4,10 +4,10 @@
 // 12V MPPT Solar Charger system for danjuliodesigns, LLC
 // "MPPT SOLAR CHARGER" PCB designed to work with commonly
 // available 36-cell 15-35W "12V" Solar Panels and 7Ah - 18 Ah
-// 12V AGM sealed lead acid batteries and power 5V-based devices
-// with an I2C interface and status signals.
+// 12V AGM sealed lead acid and LiFePO4 batteries and power 5V-based
+// devices with an I2C interface and status signals.
 //
-// Copyright (c) 2018-2019 danjuliodesigns, LLC.  All rights reserved.
+// Copyright (c) 2018-2023 danjuliodesigns, LLC.  All rights reserved.
 //
 // Implements the following functionality:
 //   1. MPPT Charge controller with 3 charge states:
@@ -17,6 +17,7 @@
 //   2. MPPT Buck converter controller
 //   3. Temperature compensation with external temperature
 //      sensor and internal temperature sensor fallback
+//      (Lead Acid batteries only)
 //   4. Load control for discharged and recharged battery
 //      conditions (low-battery cutoff)
 //   5. I2C configuration and monitoring interface
@@ -52,8 +53,10 @@
 //   P1.5 - PCTRL Digital Input with internal pull-up - Power Control configuration
 //          1: Power switch on whenever battery voltage good
 //          0: Power switched on only at night when battery voltage good
-//   P1.6 - Reserved for 32kHz crystal (used for diagnostic output)
-//   P1.7 - Reserved for 32kHz crystal (used for diagnostic output)
+//   P1.6 - Low Output - Set to logic 0 to make it easy to pull P1.7 down
+//          on PCBs
+//   P1.7 - Battery Type Input (pulled high) - Set low for LiFeP04,
+//          leave floating for Lead Acid
 //
 // Peripheral Utilization:
 //   ADC0 - Voltage, Current, Temperature measurements
@@ -63,6 +66,14 @@
 //   PCA0 - MPPT Buck PWM output, Indicator LED PWM output,
 //          internal watchdog
 //
+//
+// Notes
+// 1. A problem with the watchdog timer was found during development of
+//    version 2.0.  The watchdog would trigger as soon as it was enabled
+//    in WD_Init().  The workaround was not to disable the watchdog in
+//    Silabs_Startup() but let it run and reset it.  Execution of the
+//    initialization code occurs in less than the watchdog period so
+//    the main loop could continue with the normal reset process.
 //
 // SolarMpptCharger is free software: you can redistribute it and/or modify it
 // under the terms of the GNU Lesser General Public License as published
@@ -113,7 +124,8 @@ uint8_t mainEvalPhase = 0;
 // and may trigger before main() in some instances.
 //-----------------------------------------------------------------------------
 void SiLabs_Startup(void) {
-	WD_Disable();
+//	WD_Disable();
+	WD_Reset();
 }
 
 //-----------------------------------------------------------------------------
@@ -124,7 +136,7 @@ int main(void) {
 	enter_DefaultMode_from_RESET();
 
 	// System initialization
-	PARAM_Init();  // Initialize first to load operating params
+	PARAM_Init();  // Initialize first to read battery type and load operating params
 	ADC_Init();    // Initialize second to get initial external values
 	BUCK_Init();
 	CHARGE_Init();

@@ -35,12 +35,13 @@ bool WD_Detected;
 //-----------------------------------------------------------------------------
 // API routines
 //-----------------------------------------------------------------------------
+/*
 void WD_Disable()
 {
 	// Disable the watchdog
 	PCA0MD &= ~PCA0MD_WDTE__BMASK;
 }
-
+*/
 
 void WD_Init()
 {
@@ -48,13 +49,17 @@ void WD_Init()
 	WD_Detected = ((RSTSRC & RSTSRC_WDTRSF__BMASK) == RSTSRC_WDTRSF__SET);
 
 	// Configure our watchdog timeout
-	PCA0CPL2 = WD_PCA0CPL2_RELOAD;
+//	PCA0CPL2 = WD_PCA0CPL2_RELOAD;
 
 	// Enable and lock-enabled the watchdog timer
-	PCA0MD |= PCA0MD_WDLCK__BMASK;
+//	PCA0MD |= PCA0MD_WDLCK__BMASK;
+//	PCA0MD |= PCA0MD_WDTE__BMASK;
+//	PCA0MD = PCA0MD_CPS__SYSCLK | PCA0MD_CIDL__NORMAL
+//				| PCA0MD_ECF__OVF_INT_DISABLED | PCA0MD_WDTE__DISABLED
+//				| PCA0MD_WDLCK__LOCKED;
 
 	// Reset the watchdog
-	PCA0CPH2 = 0;
+//	PCA0CPH2 = 0;
 }
 
 

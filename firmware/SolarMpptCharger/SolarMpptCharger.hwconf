@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="ASCII"?>
-<device:XMLDevice xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:device="http://www.silabs.com/ss/hwconfig/document/device.ecore" name="EFM8SB10F8G-A-QFN24" partId="mcu.8051.efm8.sb1.efm8sb10f8g-a-qfn24" version="4.0.1" contextId="%DEFAULT%">
+<device:XMLDevice xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:device="http://www.silabs.com/ss/hwconfig/document/device.ecore" name="EFM8SB10F8G-A-QFN24" partId="mcu.8051.efm8.sb1.efm8sb10f8g-a-qfn24" version="4.0.0" contextId="%DEFAULT%">
   <mode name="DefaultMode">
     <property object="ADC_0" propertyId="ABPeripheral.included" value="true"/>
     <property object="ADC_0" propertyId="adc.accumulatorconfiguration.enable12bitmode" value="Enabled"/>
@@ -82,13 +82,10 @@
     <property object="P1.4" propertyId="ports.settings.outputmode" value="Push-pull"/>
     <property object="P1.5" propertyId="ports.settings.label" value="PCTRL"/>
     <property object="P1.6" propertyId="ports.settings.iomode" value="Digital Push-Pull Output"/>
-    <property object="P1.6" propertyId="ports.settings.label" value="DIAG1"/>
+    <property object="P1.6" propertyId="ports.settings.label" value="PULL_DOWN"/>
     <property object="P1.6" propertyId="ports.settings.latch" value="Low"/>
     <property object="P1.6" propertyId="ports.settings.outputmode" value="Push-pull"/>
-    <property object="P1.7" propertyId="ports.settings.iomode" value="Digital Push-Pull Output"/>
-    <property object="P1.7" propertyId="ports.settings.label" value="DIAG2"/>
-    <property object="P1.7" propertyId="ports.settings.latch" value="Low"/>
-    <property object="P1.7" propertyId="ports.settings.outputmode" value="Push-pull"/>
+    <property object="P1.7" propertyId="ports.settings.label" value="BATT_TYPE"/>
     <property object="PBCFG_0" propertyId="pbcfg.settings.enablecrossbar" value="Enabled"/>
     <property object="PCACH_0" propertyId="ABPeripheral.included" value="true"/>
     <property object="PCACH_0" propertyId="pcach.pcachannelcapturecomparemode.enablechannelcomparatorfunction" value="Enabled"/>

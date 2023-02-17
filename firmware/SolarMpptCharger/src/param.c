@@ -25,8 +25,16 @@
 
 
 //-----------------------------------------------------------------------------
+// External IO bits
+//-----------------------------------------------------------------------------
+SI_SBIT(IO_BATT_TYPE_I, SFR_P1, 7);
+
+
+
+//-----------------------------------------------------------------------------
 // Variables
 //-----------------------------------------------------------------------------
+bit PARAM_battIsLeadAcid;
 uint16_t PARAM_bulkMv;
 uint16_t PARAM_floatMv;
 uint16_t PARAM_pwrOffMv;
@@ -45,10 +53,19 @@ uint16_t _PARAM_ValidateNewValue(uint16_t val, uint16_t min, uint16_t max);
 // API Routines
 //-----------------------------------------------------------------------------
 void PARAM_Init(){
-	PARAM_bulkMv = V_BULK_DEFAULT;
+	// Read the battery type first
+	PARAM_battIsLeadAcid = IO_BATT_TYPE_I;
+
+	// Set parameters
+	if (PARAM_battIsLeadAcid == 1) {
+		PARAM_bulkMv = V_BULK_DEFAULT_1;
+		PARAM_pwrOnMv = V_LOAD_ON_1;
+	} else {
+		PARAM_bulkMv = V_BULK_DEFAULT_2;
+		PARAM_pwrOnMv = V_LOAD_ON_2;
+	}
 	PARAM_floatMv = V_FLOAT_DEFAULT;
 	PARAM_pwrOffMv = V_LOAD_OFF;
-	PARAM_pwrOnMv = V_LOAD_ON;
 }
 
 

@@ -102,7 +102,7 @@ extern void PCA_0_enter_DefaultMode_from_RESET(void) {
 extern void PCACH_2_enter_DefaultMode_from_RESET(void) {
 	// $[PCA0 Settings Save]
 	// Select Capture/Compare register)
-	//PCA0PWM &= ~PCA0PWM_ARSEL__BMASK;
+//	PCA0PWM &= ~PCA0PWM_ARSEL__BMASK;
 	// [PCA0 Settings Save]$
 
 	// $[PCA0CPM2 - PCA Channel 2 Capture/Compare Mode]
@@ -126,6 +126,7 @@ extern void PCACH_2_enter_DefaultMode_from_RESET(void) {
 	// [PCA0CPL2 - PCA Channel 2 Capture Module Low Byte]$
 
 	// $[PCA0CPH2 - PCA Channel 2 Capture Module High Byte]
+	PCA0CPH2 = 0x00;
 	// [PCA0CPH2 - PCA Channel 2 Capture Module High Byte]$
 
 	// $[Auto-reload]
@@ -236,11 +237,11 @@ extern void PORTS_1_enter_DefaultMode_from_RESET(void) {
 	 - P1.4 is high. Set P1.4 to drive or float high
 	 - P1.5 is high. Set P1.5 to drive or float high
 	 - P1.6 is low. Set P1.6 to drive low
-	 - P1.7 is low. Set P1.7 to drive low
+	 - P1.7 is high. Set P1.7 to drive or float high
 	 ***********************************************************************/
 	SFRPAGE = 0x00;
 	P1 = P1_B0__LOW | P1_B1__HIGH | P1_B2__HIGH | P1_B3__HIGH | P1_B4__HIGH
-			| P1_B5__HIGH | P1_B6__LOW | P1_B7__LOW;
+			| P1_B5__HIGH | P1_B6__LOW | P1_B7__HIGH;
 	// [P1 - Port 1 Pin Latch]$
 
 	// $[P1MDOUT - Port 1 Output Mode]
@@ -252,12 +253,12 @@ extern void PORTS_1_enter_DefaultMode_from_RESET(void) {
 	 - P1.4 output is push-pull
 	 - P1.5 output is open-drain
 	 - P1.6 output is push-pull
-	 - P1.7 output is push-pull
+	 - P1.7 output is open-drain
 	 ***********************************************************************/
 	P1MDOUT = P1MDOUT_B0__PUSH_PULL | P1MDOUT_B1__OPEN_DRAIN
 			| P1MDOUT_B2__OPEN_DRAIN | P1MDOUT_B3__PUSH_PULL
 			| P1MDOUT_B4__PUSH_PULL | P1MDOUT_B5__OPEN_DRAIN
-			| P1MDOUT_B6__PUSH_PULL | P1MDOUT_B7__PUSH_PULL;
+			| P1MDOUT_B6__PUSH_PULL | P1MDOUT_B7__OPEN_DRAIN;
 	// [P1MDOUT - Port 1 Output Mode]$
 
 	// $[P1MDIN - Port 1 Input Mode]
@@ -421,7 +422,7 @@ extern void ADC_0_enter_DefaultMode_from_RESET(void) {
 extern void PCACH_0_enter_DefaultMode_from_RESET(void) {
 	// $[PCA0 Settings Save]
 	// Select Capture/Compare register)
-	//PCA0PWM &= ~PCA0PWM_ARSEL__BMASK;
+//	PCA0PWM &= ~PCA0PWM_ARSEL__BMASK;
 	// [PCA0 Settings Save]$
 
 	// $[PCA0CPM0 - PCA Channel 0 Capture/Compare Mode]
@@ -445,12 +446,13 @@ extern void PCACH_0_enter_DefaultMode_from_RESET(void) {
 	// [PCA0CPL0 - PCA Channel 0 Capture Module Low Byte]$
 
 	// $[PCA0CPH0 - PCA Channel 0 Capture Module High Byte]
+	PCA0CPH0 = 0x00;
 	// [PCA0CPH0 - PCA Channel 0 Capture Module High Byte]$
 
 	// $[Auto-reload]
 	PCA0PWM |= PCA0PWM_ARSEL__AUTORELOAD;
 
-	//PCA0PWM &= ~PCA0PWM_ARSEL__BMASK;
+//	PCA0PWM &= ~PCA0PWM_ARSEL__BMASK;
 	// [Auto-reload]$
 
 	// $[PCA0 Settings Restore]
@@ -461,7 +463,7 @@ extern void PCACH_0_enter_DefaultMode_from_RESET(void) {
 extern void PCACH_1_enter_DefaultMode_from_RESET(void) {
 	// $[PCA0 Settings Save]
 	// Select Capture/Compare register)
-	//PCA0PWM &= ~PCA0PWM_ARSEL__BMASK;
+//	PCA0PWM &= ~PCA0PWM_ARSEL__BMASK;
 	// [PCA0 Settings Save]$
 
 	// $[PCA0CPM1 - PCA Channel 1 Capture/Compare Mode]
@@ -485,12 +487,13 @@ extern void PCACH_1_enter_DefaultMode_from_RESET(void) {
 	// [PCA0CPL1 - PCA Channel 1 Capture Module Low Byte]$
 
 	// $[PCA0CPH1 - PCA Channel 1 Capture Module High Byte]
+	PCA0CPH1 = 0x00;
 	// [PCA0CPH1 - PCA Channel 1 Capture Module High Byte]$
 
 	// $[Auto-reload]
 	PCA0PWM |= PCA0PWM_ARSEL__AUTORELOAD;
 
-	//PCA0PWM &= ~PCA0PWM_ARSEL__BMASK;
+//	PCA0PWM &= ~PCA0PWM_ARSEL__BMASK;
 	// [Auto-reload]$
 
 	// $[PCA0 Settings Restore]

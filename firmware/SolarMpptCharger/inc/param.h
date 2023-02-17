@@ -4,7 +4,7 @@
  * Adjustable system parameter access.  Access mechanisms for setting and
  * getting configurable system parameters.
  *
- * Copyright (c) 2018-2019 danjuliodesigns, LLC.  All rights reserved.
+ * Copyright (c) 2018-2023 danjuliodesigns, LLC.  All rights reserved.
  *
  * SolarMpptCharger is free software: you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published
@@ -36,6 +36,13 @@
 
 
 //-----------------------------------------------------------------------------
+// Externs
+//-----------------------------------------------------------------------------
+extern bit PARAM_battIsLeadAcid;
+
+
+
+//-----------------------------------------------------------------------------
 // API Routines
 //-----------------------------------------------------------------------------
 void PARAM_Init();
@@ -49,6 +56,8 @@ uint16_t PARAM_GetBulkMv();
 uint16_t PARAM_GetFloatMv();
 uint16_t PARAM_GetPwrOffMv();
 uint16_t PARAM_GetPwrOnMv();
+
+#define PARAM_GetBattIsLeadAcid()		    PARAM_battIsLeadAcid
 
 
 #endif /* INC_PARAM_H_ */
