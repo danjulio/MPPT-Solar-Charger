@@ -16,7 +16,7 @@ The charger will default to the lead acid battery type.  Add a jumper between th
 ![LiFePO4 configuration](hardware/pictures/LiFePO4_jumper.png)
 
 ### Contents
-This repository contains documentation and software for the makerPower MPPT Solar Charger board (design documented at [hackaday.io](https://hackaday.io/project/161351-solar-mppt-charger-for-247-iot-devices)).  
+This repository contains documentation and software for the makerPower MPPT Solar Charger board (design documented at [hackaday.io](https://hackaday.io/project/161351-solar-mppt-charger-for-247-iot-devices)).  It can be found in my [tindie store](https://www.tindie.com/products/globoy/mppt-solar-charger-for-intelligent-devices/).
 
 1. firmware - Charger C source code
 2. hardware - Board documentation, schematic and connection diagrams for different uses
