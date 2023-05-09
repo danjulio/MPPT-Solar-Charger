@@ -1,0 +1,948 @@
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 1   
+
+
+C51 COMPILER V9.60.0.0, COMPILATION OF MODULE PARAM
+OBJECT MODULE PLACED IN .\src/param.OBJ
+COMPILER INVOKED BY: Z:\Applications\Simplicity Studio.app\Contents\Eclipse\developer\toolchains\keil_8051\9.60\BIN\C51.
+                    -exe /Users/danjulio/SimplicityStudio/v4_workspace/SolarMpptCharger/src/param.c OMF2 COMPACT DEBUG OBJECTEXTEND ROM(LARGE
+                    -) WARNINGLEVEL(2) FLOATFUZZY(3) OPTIMIZE(9,SPEED) DEFINE(NDEBUG=1) INTVECTOR(0X0000) INTPROMOTE INCDIR(/Users/danjulio/S
+                    -implicityStudio/v4_workspace/SolarMpptCharger/inc;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/80
+                    -51/v4.1.7//Device/shared/si8051Base;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/8051/v4.1.7//Dev
+                    -ice/EFM8SB1/inc) REGFILE(SolarMpptCharger.ORC) PRINT(.\src/param.lst) COND SYMBOLS CODE PAGEWIDTH(120) PAGELENGTH(65) OB
+                    -JECT(.\src/param.OBJ)
+
+line level    source
+
+   1          /*
+   2           * param.c
+   3           *
+   4           * Adjustable system parameter access.  Access mechanisms for setting and
+   5           * getting configurable system parameters.
+   6           *
+   7           * Copyright (c) 2018-2019 danjuliodesigns, LLC.  All rights reserved.
+   8           *
+   9           * SolarMpptCharger is free software: you can redistribute it and/or modify it
+  10           * under the terms of the GNU Lesser General Public License as published
+  11           * by the Free Software Foundation, either version 3 of the License, or
+  12           * (at your option) any later version.
+  13           *
+  14           * SolarMpptCharger is distributed in the hope that it will be useful,
+  15           * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  16           * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  17           * GNU Lesser General Public License for more details.
+  18           *
+  19           * See <http://www.gnu.org/licenses/>.
+  20           *
+  21           */
+  22          #include "param.h"
+  23          #include "config.h"
+  24          #include "smbus.h"
+  25          
+  26          
+  27          //-----------------------------------------------------------------------------
+  28          // External IO bits
+  29          //-----------------------------------------------------------------------------
+  30          SI_SBIT(IO_BATT_TYPE_I, SFR_P1, 7);
+  31          
+  32          
+  33          
+  34          //-----------------------------------------------------------------------------
+  35          // Variables
+  36          //-----------------------------------------------------------------------------
+  37          bit PARAM_battIsLeadAcid;
+  38          uint16_t PARAM_bulkMv;
+  39          uint16_t PARAM_floatMv;
+  40          uint16_t PARAM_pwrOffMv;
+  41          uint16_t PARAM_pwrOnMv;
+  42          
+  43          
+  44          
+  45          //-----------------------------------------------------------------------------
+  46          // Internal routine forward declarations
+  47          //-----------------------------------------------------------------------------
+  48          uint16_t _PARAM_ValidateNewValue(uint16_t val, uint16_t min, uint16_t max);
+  49          
+  50          
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 2   
+
+  51          
+  52          //-----------------------------------------------------------------------------
+  53          // API Routines
+  54          //-----------------------------------------------------------------------------
+  55          void PARAM_Init(){
+  56   1              // Read the battery type first
+  57   1              PARAM_battIsLeadAcid = IO_BATT_TYPE_I;
+  58   1      
+  59   1              // Set parameters
+  60   1              if (PARAM_battIsLeadAcid == 1) {
+  61   2                      PARAM_bulkMv = V_BULK_DEFAULT_1;
+  62   2                      PARAM_pwrOnMv = V_LOAD_ON_1;
+  63   2              } else {
+  64   2                      PARAM_bulkMv = V_BULK_DEFAULT_2;
+  65   2                      PARAM_pwrOnMv = V_LOAD_ON_2;
+  66   2              }
+  67   1              PARAM_floatMv = V_FLOAT_DEFAULT;
+  68   1              PARAM_pwrOffMv = V_LOAD_OFF;
+  69   1      }
+  70          
+  71          
+  72          //
+  73          // API routines for interrupt-driven SMBUS logic
+  74          //
+  75          void PARAM_SetIndexedValue(uint8_t index, uint16_t val)
+  76          {
+  77   1              switch (index) {
+  78   2              case PARAM_INDEX_BULK:
+  79   2                      PARAM_bulkMv = _PARAM_ValidateNewValue(val, V_BULK_MIN, V_BULK_MAX);
+  80   2                      break;
+  81   2              case PARAM_INDEX_FLOAT:
+  82   2                      PARAM_floatMv = _PARAM_ValidateNewValue(val, V_FLOAT_MIN, V_FLOAT_MAX);
+  83   2                      break;
+  84   2              case PARAM_INDEX_PWROFF:
+  85   2                      PARAM_pwrOffMv = _PARAM_ValidateNewValue(val, V_LOAD_OFF_MIN, PARAM_pwrOnMv);
+  86   2                      break;
+  87   2              case PARAM_INDEX_PWRON:
+  88   2                      PARAM_pwrOnMv = _PARAM_ValidateNewValue(val, V_LOAD_ON_MIN, V_LOAD_ON_MAX);
+  89   2                      break;
+  90   2              }
+  91   1      }
+  92          
+  93          
+  94          uint16_t PARAM_GetIndexedValue(uint8_t index)
+  95          {
+  96   1              uint16_t v = 0;
+  97   1      
+  98   1              switch (index) {
+  99   2              case PARAM_INDEX_BULK:
+ 100   2                      v = PARAM_bulkMv;
+ 101   2                      break;
+ 102   2              case PARAM_INDEX_FLOAT:
+ 103   2                      v = PARAM_floatMv;
+ 104   2                      break;
+ 105   2              case PARAM_INDEX_PWROFF:
+ 106   2                      v = PARAM_pwrOffMv;
+ 107   2                      break;
+ 108   2              case PARAM_INDEX_PWRON:
+ 109   2                      v = PARAM_pwrOnMv;
+ 110   2                      break;
+ 111   2              }
+ 112   1      
+ 113   1              return v;
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 3   
+
+ 114   1      }
+ 115          
+ 116          
+ 117          //
+ 118          // API routines for main code thread
+ 119          //
+ 120          uint16_t PARAM_GetBulkMv()
+ 121          {
+ 122   1              uint16_t v;
+ 123   1      
+ 124   1              // Atomically access variable
+ 125   1              SMBUS_DIS_INT();
+ 126   1              v = PARAM_bulkMv;
+ 127   1              SMBUS_EN_INT();
+ 128   1      
+ 129   1              return v;
+ 130   1      }
+ 131          
+ 132          
+ 133          uint16_t PARAM_GetFloatMv()
+ 134          {
+ 135   1              uint16_t v;
+ 136   1      
+ 137   1              // Atomically access variable
+ 138   1              SMBUS_DIS_INT();
+ 139   1              v = PARAM_floatMv;
+ 140   1              SMBUS_EN_INT();
+ 141   1      
+ 142   1              return v;
+ 143   1      }
+ 144          
+ 145          
+ 146          uint16_t PARAM_GetPwrOffMv()
+ 147          {
+ 148   1              uint16_t v;
+ 149   1      
+ 150   1              // Atomically access variable
+ 151   1              SMBUS_DIS_INT();
+ 152   1              v = PARAM_pwrOffMv;
+ 153   1              SMBUS_EN_INT();
+ 154   1      
+ 155   1              return v;
+ 156   1      }
+ 157          
+ 158          
+ 159          uint16_t PARAM_GetPwrOnMv()
+ 160          {
+ 161   1              uint16_t v;
+ 162   1      
+ 163   1              // Atomically access variable
+ 164   1              SMBUS_DIS_INT();
+ 165   1              v = PARAM_pwrOnMv;
+ 166   1              SMBUS_EN_INT();
+ 167   1      
+ 168   1              return v;
+ 169   1      }
+ 170          
+ 171          
+ 172          
+ 173          //-----------------------------------------------------------------------------
+ 174          // Internal routines
+ 175          //-----------------------------------------------------------------------------
+ 176          uint16_t _PARAM_ValidateNewValue(uint16_t val, uint16_t min, uint16_t max)
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 4   
+
+ 177          {
+ 178   1              if (val < min) {
+ 179   2                      return min;
+ 180   2              } else if (val > max) {
+ 181   2                      return max;
+ 182   2              } else {
+ 183   2                      return val;
+ 184   2              }
+ 185   1      }
+ 186          
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 5   
+
+ASSEMBLY LISTING OF GENERATED OBJECT CODE
+
+
+             ; FUNCTION Com0020 (BEGIN)
+0000         L?0033:
+0000         L?0034:
+0000 E2                MOVX    A,@R0
+0001 FE                MOV     R6,A
+0002 08                INC     R0
+0003 E2                MOVX    A,@R0
+0004 FF                MOV     R7,A
+0005 43E601            ORL     EIE1,#01H
+0008 22                RET     
+             ; FUNCTION Com0020 (END)
+
+             ; FUNCTION PARAM_Init (BEGIN)
+                                           ; SOURCE LINE # 55
+                                           ; SOURCE LINE # 57
+0000 A297              MOV     C,IO_BATT_TYPE_I
+0002 9200        R     MOV     PARAM_battIsLeadAcid,C
+                                           ; SOURCE LINE # 60
+0004 7800        R     MOV     R0,#LOW PARAM_bulkMv
+0006 300012            JNB     PARAM_battIsLeadAcid,?C0001
+                                           ; SOURCE LINE # 61
+0009 7439              MOV     A,#039H
+000B F2                MOVX    @R0,A
+000C 08                INC     R0
+000D 746C              MOV     A,#06CH
+000F F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 62
+0010 7800        R     MOV     R0,#LOW PARAM_pwrOnMv
+0012 7430              MOV     A,#030H
+0014 F2                MOVX    @R0,A
+0015 08                INC     R0
+0016 74D4              MOV     A,#0D4H
+0018 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 63
+0019 8010              SJMP    ?C0002
+001B         ?C0001:
+                                           ; SOURCE LINE # 64
+001B 7438              MOV     A,#038H
+001D F2                MOVX    @R0,A
+001E 08                INC     R0
+001F 7440              MOV     A,#040H
+0021 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 65
+0022 7800        R     MOV     R0,#LOW PARAM_pwrOnMv
+0024 7435              MOV     A,#035H
+0026 F2                MOVX    @R0,A
+0027 08                INC     R0
+0028 7420              MOV     A,#020H
+002A F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 66
+002B         ?C0002:
+                                           ; SOURCE LINE # 67
+002B 7800        R     MOV     R0,#LOW PARAM_floatMv
+002D 7435              MOV     A,#035H
+002F F2                MOVX    @R0,A
+0030 08                INC     R0
+0031 7452              MOV     A,#052H
+0033 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 68
+0034 7800        R     MOV     R0,#LOW PARAM_pwrOffMv
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 6   
+
+0036 742C              MOV     A,#02CH
+0038 F2                MOVX    @R0,A
+0039 08                INC     R0
+003A 74EC              MOV     A,#0ECH
+003C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 69
+003D 22                RET     
+             ; FUNCTION PARAM_Init (END)
+
+             ; FUNCTION _PARAM_SetIndexedValue (BEGIN)
+                                           ; SOURCE LINE # 75
+0000 7800        R     MOV     R0,#LOW val
+0002 EC                MOV     A,R4
+0003 F2                MOVX    @R0,A
+0004 08                INC     R0
+0005 ED                MOV     A,R5
+0006 F2                MOVX    @R0,A
+;---- Variable 'index' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 76
+                                           ; SOURCE LINE # 77
+0007 EF                MOV     A,R7
+0008 14                DEC     A
+0009 6015              JZ      ?C0006
+000B 14                DEC     A
+000C 6028              JZ      ?C0007
+000E 14                DEC     A
+000F 603E              JZ      ?C0008
+0011 2403              ADD     A,#03H
+0013 7048              JNZ     ?C0009
+                                           ; SOURCE LINE # 78
+0015         ?C0005:
+                                           ; SOURCE LINE # 79
+0015 7DB0              MOV     R5,#0B0H
+0017 7C36              MOV     R4,#036H
+0019 120000      R     LCALL   L?0031
+001C 7800        R     MOV     R0,#LOW PARAM_bulkMv
+                                           ; SOURCE LINE # 80
+001E 8038              SJMP    ?C0027
+                                           ; SOURCE LINE # 81
+0020         ?C0006:
+                                           ; SOURCE LINE # 82
+0020 7800        R     MOV     R0,#LOW val
+0022 E2                MOVX    A,@R0
+0023 FE                MOV     R6,A
+0024 08                INC     R0
+0025 E2                MOVX    A,@R0
+0026 FF                MOV     R7,A
+0027 7BB0              MOV     R3,#0B0H
+0029 7A36              MOV     R2,#036H
+002B 7DC8              MOV     R5,#0C8H
+002D 7C32              MOV     R4,#032H
+002F 120000      R     LCALL   __PARAM_ValidateNewValue
+0032 7800        R     MOV     R0,#LOW PARAM_floatMv
+0034         ?C0025:
+                                           ; SOURCE LINE # 83
+0034 8022              SJMP    ?C0027
+                                           ; SOURCE LINE # 84
+0036         ?C0007:
+                                           ; SOURCE LINE # 85
+0036 7800        R     MOV     R0,#LOW val
+0038 E2                MOVX    A,@R0
+0039 FE                MOV     R6,A
+003A 08                INC     R0
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 7   
+
+003B E2                MOVX    A,@R0
+003C FF                MOV     R7,A
+003D 7800        R     MOV     R0,#LOW PARAM_pwrOnMv
+003F E2                MOVX    A,@R0
+0040 FA                MOV     R2,A
+0041 08                INC     R0
+0042 E2                MOVX    A,@R0
+0043 FB                MOV     R3,A
+0044 7DF8              MOV     R5,#0F8H
+0046 7C2A              MOV     R4,#02AH
+0048 120000      R     LCALL   __PARAM_ValidateNewValue
+004B 7800        R     MOV     R0,#LOW PARAM_pwrOffMv
+004D         ?C0026:
+                                           ; SOURCE LINE # 86
+004D 8009              SJMP    ?C0027
+                                           ; SOURCE LINE # 87
+004F         ?C0008:
+                                           ; SOURCE LINE # 88
+004F 7DE0              MOV     R5,#0E0H
+0051 7C2E              MOV     R4,#02EH
+0053 120000      R     LCALL   L?0031
+0056 7800        R     MOV     R0,#LOW PARAM_pwrOnMv
+0058         ?C0027:
+0058 EE                MOV     A,R6
+0059 F2                MOVX    @R0,A
+005A 08                INC     R0
+005B EF                MOV     A,R7
+005C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 89
+                                           ; SOURCE LINE # 90
+                                           ; SOURCE LINE # 91
+005D         ?C0009:
+005D 22                RET     
+005E         L?0031:
+005E 7800        R     MOV     R0,#LOW val
+0060 E2                MOVX    A,@R0
+0061 FE                MOV     R6,A
+0062 08                INC     R0
+0063 E2                MOVX    A,@R0
+0064 FF                MOV     R7,A
+0065 7B98              MOV     R3,#098H
+0067 7A3A              MOV     R2,#03AH
+0069 120000      R     LCALL   __PARAM_ValidateNewValue
+006C 22                RET     
+             ; FUNCTION _PARAM_SetIndexedValue (END)
+
+             ; FUNCTION _PARAM_GetIndexedValue (BEGIN)
+                                           ; SOURCE LINE # 94
+;---- Variable 'index' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 95
+                                           ; SOURCE LINE # 96
+;---- Variable 'v' assigned to Register 'R4/R5' ----
+0000 E4                CLR     A
+0001 FD                MOV     R5,A
+0002 FC                MOV     R4,A
+                                           ; SOURCE LINE # 98
+0003 EF                MOV     A,R7
+0004 14                DEC     A
+0005 600E              JZ      ?C0012
+0007 14                DEC     A
+0008 600F              JZ      ?C0013
+000A 14                DEC     A
+000B 6010              JZ      ?C0014
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 8   
+
+000D 2403              ADD     A,#03H
+000F 7013              JNZ     ?C0010
+                                           ; SOURCE LINE # 99
+0011         ?C0011:
+                                           ; SOURCE LINE # 100
+0011 7800        R     MOV     R0,#LOW PARAM_bulkMv
+                                           ; SOURCE LINE # 101
+0013 800A              SJMP    ?C0030
+                                           ; SOURCE LINE # 102
+0015         ?C0012:
+                                           ; SOURCE LINE # 103
+0015 7800        R     MOV     R0,#LOW PARAM_floatMv
+0017         ?C0028:
+                                           ; SOURCE LINE # 104
+0017 8006              SJMP    ?C0030
+                                           ; SOURCE LINE # 105
+0019         ?C0013:
+                                           ; SOURCE LINE # 106
+0019 7800        R     MOV     R0,#LOW PARAM_pwrOffMv
+001B         ?C0029:
+                                           ; SOURCE LINE # 107
+001B 8002              SJMP    ?C0030
+                                           ; SOURCE LINE # 108
+001D         ?C0014:
+                                           ; SOURCE LINE # 109
+001D 7800        R     MOV     R0,#LOW PARAM_pwrOnMv
+001F         ?C0030:
+001F E2                MOVX    A,@R0
+0020 FC                MOV     R4,A
+0021 08                INC     R0
+0022 E2                MOVX    A,@R0
+0023 FD                MOV     R5,A
+                                           ; SOURCE LINE # 110
+                                           ; SOURCE LINE # 111
+0024         ?C0010:
+                                           ; SOURCE LINE # 113
+0024 AE04              MOV     R6,AR4
+0026 AF05              MOV     R7,AR5
+                                           ; SOURCE LINE # 114
+0028 22                RET     
+             ; FUNCTION _PARAM_GetIndexedValue (END)
+
+             ; FUNCTION PARAM_GetBulkMv (BEGIN)
+                                           ; SOURCE LINE # 120
+                                           ; SOURCE LINE # 121
+                                           ; SOURCE LINE # 125
+0000 53E6FE            ANL     EIE1,#0FEH
+                                           ; SOURCE LINE # 126
+0003 7800        R     MOV     R0,#LOW PARAM_bulkMv
+;---- Variable 'v' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 127
+0005 120000      R     LCALL   L?0033
+                                           ; SOURCE LINE # 129
+                                           ; SOURCE LINE # 130
+0008 22                RET     
+             ; FUNCTION PARAM_GetBulkMv (END)
+
+             ; FUNCTION PARAM_GetFloatMv (BEGIN)
+                                           ; SOURCE LINE # 133
+                                           ; SOURCE LINE # 134
+                                           ; SOURCE LINE # 138
+0000 53E6FE            ANL     EIE1,#0FEH
+                                           ; SOURCE LINE # 139
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 9   
+
+0003 7800        R     MOV     R0,#LOW PARAM_floatMv
+;---- Variable 'v' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 140
+0005 120000      R     LCALL   L?0033
+                                           ; SOURCE LINE # 142
+                                           ; SOURCE LINE # 143
+0008 22                RET     
+             ; FUNCTION PARAM_GetFloatMv (END)
+
+             ; FUNCTION PARAM_GetPwrOffMv (BEGIN)
+                                           ; SOURCE LINE # 146
+                                           ; SOURCE LINE # 147
+                                           ; SOURCE LINE # 151
+0000 53E6FE            ANL     EIE1,#0FEH
+                                           ; SOURCE LINE # 152
+0003 7800        R     MOV     R0,#LOW PARAM_pwrOffMv
+;---- Variable 'v' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 153
+0005 120000      R     LCALL   L?0034
+                                           ; SOURCE LINE # 155
+                                           ; SOURCE LINE # 156
+0008 22                RET     
+             ; FUNCTION PARAM_GetPwrOffMv (END)
+
+             ; FUNCTION PARAM_GetPwrOnMv (BEGIN)
+                                           ; SOURCE LINE # 159
+                                           ; SOURCE LINE # 160
+                                           ; SOURCE LINE # 164
+0000 53E6FE            ANL     EIE1,#0FEH
+                                           ; SOURCE LINE # 165
+0003 7800        R     MOV     R0,#LOW PARAM_pwrOnMv
+;---- Variable 'v' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 166
+0005 120000      R     LCALL   L?0034
+                                           ; SOURCE LINE # 168
+                                           ; SOURCE LINE # 169
+0008 22                RET     
+             ; FUNCTION PARAM_GetPwrOnMv (END)
+
+             ; FUNCTION __PARAM_ValidateNewValue (BEGIN)
+                                           ; SOURCE LINE # 176
+0000 7800        R     MOV     R0,#LOW min
+0002 EC                MOV     A,R4
+0003 F2                MOVX    @R0,A
+0004 08                INC     R0
+0005 ED                MOV     A,R5
+0006 F2                MOVX    @R0,A
+;---- Variable 'val' assigned to Register 'R6/R7' ----
+;---- Variable 'max' assigned to Register 'R2/R3' ----
+                                           ; SOURCE LINE # 177
+                                           ; SOURCE LINE # 178
+0007 D3                SETB    C
+0008 E2                MOVX    A,@R0
+0009 9F                SUBB    A,R7
+000A 18                DEC     R0
+000B E2                MOVX    A,@R0
+000C 9E                SUBB    A,R6
+000D 4006              JC      ?C0020
+                                           ; SOURCE LINE # 179
+000F E2                MOVX    A,@R0
+0010 FE                MOV     R6,A
+0011 08                INC     R0
+0012 E2                MOVX    A,@R0
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 10  
+
+0013 FF                MOV     R7,A
+0014 22                RET     
+                                           ; SOURCE LINE # 180
+0015         ?C0020:
+0015 D3                SETB    C
+0016 EF                MOV     A,R7
+0017 9B                SUBB    A,R3
+0018 EE                MOV     A,R6
+0019 9A                SUBB    A,R2
+001A 4005              JC      ?C0023
+                                           ; SOURCE LINE # 181
+001C AE02              MOV     R6,AR2
+001E AF03              MOV     R7,AR3
+0020 22                RET     
+                                           ; SOURCE LINE # 182
+0021         ?C0023:
+                                           ; SOURCE LINE # 183
+                                           ; SOURCE LINE # 184
+                                           ; SOURCE LINE # 185
+0021         ?C0021:
+0021 22                RET     
+             ; FUNCTION __PARAM_ValidateNewValue (END)
+
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 11  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+SPI0CKR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A2H  1
+uint16_t . . . . . . . . . . . . . . .  TYPEDEF  -----  U_INT    -----  2
+P0 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0080H  1
+PSW_OV . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D2H  1
+XOSC0CN. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B1H  1
+P1 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0090H  1
+P2 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A0H  1
+uint64_t . . . . . . . . . . . . . . .  TYPEDEF  -----  ARRAY    -----  8
+ADC0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0097H  1
+SI_GEN_PTR_t . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  3
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  3
+  gptr . . . . . . . . . . . . . . . .  MEMBER   -----  STRUCT   0000H  3
+SMB0CN0_MASTER . . . . . . . . . . . .  ABSBIT   -----  BIT      00C7H  1
+PCA0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00F9H  2
+RTC0KEY. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AEH  1
+EIE1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E6H  1
+SMB0CN0_ACK. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C1H  1
+EIE2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E7H  1
+int32_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  LONG     -----  4
+PSCTL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008FH  1
+IT01CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E4H  1
+CS0CN0 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B0H  1
+int16_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  INT      -----  2
+SMB0CN0_TXMODE . . . . . . . . . . . .  ABSBIT   -----  BIT      00C6H  1
+DERIVID. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E3H  1
+CS0MD1 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AFH  1
+SFRPAGE. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A7H  1
+CS0MD2 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F3H  1
+P0MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A4H  1
+CS0MD3 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F3H  1
+int64_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  ARRAY    -----  8
+P1MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A5H  1
+SI_UU32. . . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  4
+  u32. . . . . . . . . . . . . . . . .  MEMBER   -----  U_LONG   0000H  4
+  s32. . . . . . . . . . . . . . . . .  MEMBER   -----  LONG     0000H  4
+  uu16 . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+ADC0CN0_ADINT. . . . . . . . . . . . .  ABSBIT   -----  BIT      00EDH  1
+TMR2RLH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CBH  1
+P2MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A6H  1
+IE . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A8H  1
+false. . . . . . . . . . . . . . . . .  E_CONST  -----  U_CHAR   -----  1
+TMR3RLH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0093H  1
+SI_UU16. . . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  2
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  U_INT    0000H  2
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  INT      0000H  2
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+__PARAM_ValidateNewValue . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  val. . . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+  min. . . . . . . . . . . . . . . . .  AUTO     PDATA  U_INT    0000H  2
+  max. . . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0002H  2
+PARAM_pwrOffMv . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0000H  2
+EIP1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F6H  1
+EIP2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F7H  1
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 12  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+PARAM_GetPwrOffMv. . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  v. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+SCON0_RB8. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009AH  1
+TMR2RLL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CAH  1
+PCA0CPH0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FCH  1
+TMR3RLL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0092H  1
+PCA0CPH1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EAH  1
+GPTR_t . . . . . . . . . . . . . . . .  TYPEDEF  -----  STRUCT   -----  3
+  memtype. . . . . . . . . . . . . . .  MEMBER   -----  U_CHAR   0000H  1
+  address. . . . . . . . . . . . . . .  MEMBER   -----  UNION    0001H  2
+SCON0_TB8. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009BH  1
+CS0CN0_CSEN. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B7H  1
+B_B0 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F0H  1
+DP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0082H  2
+PCA0CPH2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ECH  1
+B_B1 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F1H  1
+ADC0GT . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00C3H  2
+B_B2 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F2H  1
+PCA0CPL0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FBH  1
+B_B3 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F3H  1
+PCA0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D9H  1
+PCA0CPM0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DAH  1
+PCA0CPL1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E9H  1
+B_B4 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F4H  1
+PCA0CPM1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DBH  1
+PCA0CPL2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EBH  1
+B_B5 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F5H  1
+PCA0CPM2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DCH  1
+IP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B8H  1
+ADC0TK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BCH  1
+B_B6 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F6H  1
+ADC0LT . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00C5H  2
+IREF0CN0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D6H  1
+SCON0_MCE. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009DH  1
+B_B7 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F7H  1
+XBR0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E1H  1
+SMB0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C1H  1
+XBR1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E2H  1
+CS0SCAN0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D2H  1
+SMB0CN0_STA. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C5H  1
+XBR2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E3H  1
+CS0SCAN1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D3H  1
+ADC0MX . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0096H  1
+ACC_ACC0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E0H  1
+REF0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D1H  1
+HFO0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B2H  1
+CKCON0 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008EH  1
+ACC_ACC1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E1H  1
+REG0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C9H  1
+CRC0IN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0085H  1
+TMR2CN0_TR2. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CAH  1
+ACC_ACC2 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E2H  1
+ACC_ACC3 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E3H  1
+SP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0081H  1
+CMP0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009DH  1
+ACC_ACC4 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E4H  1
+PCA0CN0_CCF0 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D8H  1
+ACC_ACC5 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E5H  1
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 13  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+PCA0CN0_CCF1 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D9H  1
+ACC_ACC6 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E6H  1
+TMR2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00CCH  2
+PCA0CN0_CCF2 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DAH  1
+ACC_ACC7 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E7H  1
+TMR3 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0094H  2
+CS0CN0_CSCMPF. . . . . . . . . . . . .  ABSBIT   -----  BIT      00B0H  1
+SMB0CN0_ACKRQ. . . . . . . . . . . . .  ABSBIT   -----  BIT      00C3H  1
+VDM0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FFH  1
+P0MDIN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F1H  1
+PARAM_battIsLeadAcid . . . . . . . . .  PUBLIC   DATA   BIT      0000H  1
+SCON0_REN. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009CH  1
+P1MDIN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F2H  1
+CS0THH . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FEH  1
+SMB0CN0_STO. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C4H  1
+PMU0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B5H  1
+P0MASK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C7H  1
+bool . . . . . . . . . . . . . . . . .  TYPEDEF  DATA   BIT      -----  1
+P1MASK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BFH  1
+SI_GEN_PTR . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  3
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  3
+  gptr . . . . . . . . . . . . . . . .  MEMBER   -----  STRUCT   0000H  3
+CS0THL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FDH  1
+PARAM_pwrOnMv. . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0002H  2
+PARAM_floatMv. . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0004H  2
+PSW_RS0. . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D3H  1
+PCA0CN0_CF . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DFH  1
+SPI0CN0_RXOVRN . . . . . . . . . . . .  ABSBIT   -----  BIT      00FCH  1
+PSW_RS1. . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D4H  1
+PARAM_GetPwrOnMv . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  v. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+PARAM_GetFloatMv . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  v. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+TMR2CN0_T2XCLK0. . . . . . . . . . . .  ABSBIT   -----  BIT      00C8H  1
+TMR2CN0_T2XCLK1. . . . . . . . . . . .  ABSBIT   -----  BIT      00C9H  1
+ADC0CN0_ADEN . . . . . . . . . . . . .  ABSBIT   -----  BIT      00EFH  1
+TMOD . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0089H  1
+TCON . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0088H  1
+PMU0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B5H  1
+PMU0FL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CEH  1
+CRC0FLIP . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009CH  1
+PSW_PARITY . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D0H  1
+IE_ES0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ACH  1
+CMP0MX . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009FH  1
+IE_ET0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A9H  1
+IE_ET1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ABH  1
+P0SKIP . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D4H  1
+IE_ET2 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ADH  1
+P1SKIP . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D5H  1
+ADC0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E8H  1
+_PARAM_GetIndexedValue . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  index. . . . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0007H  1
+  v. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0004H  2
+IE_EX0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A8H  1
+PCA0CN0_CR . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DEH  1
+IE_EX1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AAH  1
+SCON0_SMODE. . . . . . . . . . . . . .  ABSBIT   -----  BIT      009FH  1
+CLKSEL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A9H  1
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 14  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+SPI0CN0_SPIEN. . . . . . . . . . . . .  ABSBIT   -----  BIT      00F8H  1
+B. . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F0H  1
+ADC0H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BEH  1
+true . . . . . . . . . . . . . . . . .  E_CONST  -----  U_CHAR   -----  1
+CRC0AUTO . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009EH  1
+CS0CN0_CSBUSY. . . . . . . . . . . . .  ABSBIT   -----  BIT      00B4H  1
+ADC0CN0_ADBMEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00EEH  1
+TMR2RL . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00CAH  2
+ADC0L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BDH  1
+TMR3RL . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0092H  2
+PCA0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D8H  1
+ACC. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E0H  1
+PARAM_bulkMv . . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0006H  2
+_PARAM_SetIndexedValue . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  index. . . . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0007H  1
+  val. . . . . . . . . . . . . . . . .  AUTO     PDATA  U_INT    0000H  2
+PCA0CP0. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00FBH  2
+PARAM_GetBulkMv. . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  v. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+PCA0CP1. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00E9H  2
+PCA0CP2. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00EBH  2
+CRC0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0084H  1
+TH0. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008CH  1
+IP_PS0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BCH  1
+TH1. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008DH  1
+PCA0H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FAH  1
+IP_PT0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B9H  1
+IP_PT1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BBH  1
+uint8_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  U_CHAR   -----  1
+SMB0CN0_ARBLOST. . . . . . . . . . . .  ABSBIT   -----  BIT      00C2H  1
+IP_PT2 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BDH  1
+TL0. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008AH  1
+CS0CF. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AAH  1
+SPI0CN0_TXBMT. . . . . . . . . . . . .  ABSBIT   -----  BIT      00F9H  1
+PSW_F0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D5H  1
+IE_ESPI0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AEH  1
+TL1. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008BH  1
+PCA0L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F9H  1
+SMB0CN0_SI . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C0H  1
+PSW_F1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D1H  1
+P0_B0. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0080H  1
+IP_PX0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B8H  1
+P1_B0. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0090H  1
+P0_B1. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0081H  1
+IP_PX1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BAH  1
+CS0DH. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EEH  1
+CMP0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009BH  1
+TCON_IE0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0089H  1
+P1_B1. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0091H  1
+P0_B2. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0082H  1
+TCON_IE1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008BH  1
+P1_B2. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0092H  1
+P0_B3. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0083H  1
+SMB0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C0H  1
+P1_B3. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0093H  1
+P0_B4. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0084H  1
+P1_B4. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0094H  1
+P0_B5. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0085H  1
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 15  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+CS0DL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EDH  1
+P1_B5. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0095H  1
+P0_B6. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0086H  1
+P1_B6. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0096H  1
+P0_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0087H  1
+int8_t . . . . . . . . . . . . . . . .  TYPEDEF  -----  CHAR     -----  1
+P1_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0097H  1
+P2_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A7H  1
+DPH. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0083H  1
+ADC0GTH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C4H  1
+TMR2CN0_TF2H . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CFH  1
+TMR2CN0_T2SPLIT. . . . . . . . . . . .  ABSBIT   -----  BIT      00CBH  1
+PSW_AC . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D6H  1
+SPI0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F8H  1
+HFO0CAL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B3H  1
+CS0SE. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DEH  1
+TCON_TF0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008DH  1
+SCON0_RI . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0098H  1
+DPL. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0082H  1
+TCON_TF1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008FH  1
+SBUF0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0099H  1
+PCON0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0087H  1
+IREF0CF. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B9H  1
+ADC0GTL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C3H  1
+SI_UU32_t. . . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  4
+  u32. . . . . . . . . . . . . . . . .  MEMBER   -----  U_LONG   0000H  4
+  s32. . . . . . . . . . . . . . . . .  MEMBER   -----  LONG     0000H  4
+  uu16 . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+TMR2CN0_TF2L . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CEH  1
+SCON0_TI . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0099H  1
+ADC0CN0_ADCM0. . . . . . . . . . . . .  ABSBIT   -----  BIT      00E8H  1
+ADC0LTH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C6H  1
+TCON_IT0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0088H  1
+CS0CN0_CSPME . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B1H  1
+ADC0CN0_ADCM1. . . . . . . . . . . . .  ABSBIT   -----  BIT      00E9H  1
+RSTSRC . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EFH  1
+P0MAT. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D7H  1
+CRC0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0086H  1
+SI_UU16_t. . . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  2
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  U_INT    0000H  2
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  INT      0000H  2
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+TCON_IT1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008AH  1
+ADC0CN0_ADCM2. . . . . . . . . . . . .  ABSBIT   -----  BIT      00EAH  1
+SCON0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0098H  1
+P1MAT. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CFH  1
+CS0PM. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DEH  1
+ADC0CN0_ADWINT . . . . . . . . . . . .  ABSBIT   -----  BIT      00EBH  1
+ADC0CN0_ADBUSY . . . . . . . . . . . .  ABSBIT   -----  BIT      00ECH  1
+SMB0ADM. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F5H  1
+ADC0LTL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C5H  1
+SPI0CN0_MODF . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FDH  1
+IP_PSPI0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BEH  1
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 16  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+CS0CN0_CSEOS . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B6H  1
+TMR2CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C8H  1
+PARAM_Init . . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+TMR3CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0091H  1
+SMB0ADR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F4H  1
+TCON_TR0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008CH  1
+CS0CN0_CSINT . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B5H  1
+CS0MX. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ABH  1
+TMR2CN0_TF2CEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00CCH  1
+TCON_TR1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008EH  1
+SMB0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C2H  1
+P0DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0099H  1
+CS0SS. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DDH  1
+AUX. . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0080H  1
+TMR2H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CDH  1
+SPI0CFG. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A1H  1
+P1DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009BH  1
+TMR3H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0095H  1
+P2DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009DH  1
+CRC0CNT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009AH  1
+IO_BATT_TYPE_I . . . . . . . . . . . .  ABSBIT   -----  BIT      0097H  1
+TMR2L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CCH  1
+RTC0ADR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ACH  1
+SPI0CN0_SPIF . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FFH  1
+TMR3L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0094H  1
+ADC0PWR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BBH  1
+IE_EA. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AFH  1
+RTC0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ADH  1
+CS0CN0_CSCMPEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00B3H  1
+FLSCL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B6H  1
+TMR2CN0_TF2LEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00CDH  1
+SPI0CN0_WCOL . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FEH  1
+SPI0CN0_NSSMD0 . . . . . . . . . . . .  ABSBIT   -----  BIT      00FAH  1
+PSW_CY . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D7H  1
+SPI0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A3H  1
+SPI0CN0_NSSMD1 . . . . . . . . . . . .  ABSBIT   -----  BIT      00FBH  1
+ADC0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00BDH  2
+TOFFH. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008EH  1
+PSW. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D0H  1
+PCA0PWM. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DFH  1
+REVID. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E2H  1
+TOFFL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008DH  1
+FLKEY. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B7H  1
+uint32_t . . . . . . . . . . . . . . .  TYPEDEF  -----  U_LONG   -----  4
+ADC0AC . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BAH  1
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =    291    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =      8       4
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =      1    ----
+   EDATA SIZE       =   ----    ----
+   HDATA SIZE       =   ----    ----
+   XDATA CONST SIZE =   ----    ----
+   FAR CONST SIZE   =   ----    ----
+C51 COMPILER V9.60.0.0   PARAM                                                             02/10/2023 13:46:30 PAGE 17  
+
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

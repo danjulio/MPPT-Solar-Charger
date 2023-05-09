@@ -1,0 +1,542 @@
+C51 COMPILER V9.60.0.0   TIMER                                                             02/10/2023 13:46:33 PAGE 1   
+
+
+C51 COMPILER V9.60.0.0, COMPILATION OF MODULE TIMER
+OBJECT MODULE PLACED IN .\src/timer.OBJ
+COMPILER INVOKED BY: Z:\Applications\Simplicity Studio.app\Contents\Eclipse\developer\toolchains\keil_8051\9.60\BIN\C51.
+                    -exe /Users/danjulio/SimplicityStudio/v4_workspace/SolarMpptCharger/src/timer.c OMF2 COMPACT DEBUG OBJECTEXTEND ROM(LARGE
+                    -) WARNINGLEVEL(2) FLOATFUZZY(3) OPTIMIZE(9,SPEED) DEFINE(NDEBUG=1) INTVECTOR(0X0000) INTPROMOTE INCDIR(/Users/danjulio/S
+                    -implicityStudio/v4_workspace/SolarMpptCharger/inc;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/80
+                    -51/v4.1.7//Device/shared/si8051Base;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/8051/v4.1.7//Dev
+                    -ice/EFM8SB1/inc) REGFILE(SolarMpptCharger.ORC) PRINT(.\src/timer.lst) COND SYMBOLS CODE PAGEWIDTH(120) PAGELENGTH(65) OB
+                    -JECT(.\src/timer.OBJ)
+
+line level    source
+
+   1          /*
+   2           * timer.c
+   3           *
+   4           * Main code evaluation timer.  Generates fast and low tick values to cause
+   5           * activity by the main evaluation thread.
+   6           *
+   7           * Copyright (c) 2018-2019 danjuliodesigns, LLC.  All rights reserved.
+   8           *
+   9           * SolarMpptCharger is free software: you can redistribute it and/or modify it
+  10           * under the terms of the GNU Lesser General Public License as published
+  11           * by the Free Software Foundation, either version 3 of the License, or
+  12           * (at your option) any later version.
+  13           *
+  14           * SolarMpptCharger is distributed in the hope that it will be useful,
+  15           * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  16           * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  17           * GNU Lesser General Public License for more details.
+  18           *
+  19           * See <http://www.gnu.org/licenses/>.
+  20           *
+  21           */
+  22          #include "timer.h"
+  23          
+  24          //-----------------------------------------------------------------------------
+  25          // Variables
+  26          //-----------------------------------------------------------------------------
+  27          volatile bool TIMER_IsrTick;
+  28          bool TIMER_fastTick;
+  29          bool TIMER_slowTick;
+  30          uint8_t TIMER_FastCount;
+  31          uint8_t TIMER_SlowCount;
+  32          
+  33          
+  34          
+  35          //-----------------------------------------------------------------------------
+  36          // API Routines
+  37          //-----------------------------------------------------------------------------
+  38          void TIMER_Init()
+  39          {
+  40   1              TIMER_IsrTick = false;
+  41   1              TIMER_FastCount = 0;
+  42   1              TIMER_SlowCount = 0;
+  43   1      }
+  44          
+  45          
+  46          // Designed to be called once per system evaluation interval
+  47          void TIMER_Update()
+  48          {
+  49   1              // Flags set as necessary for this evaluation interval
+  50   1              TIMER_fastTick = false;
+C51 COMPILER V9.60.0.0   TIMER                                                             02/10/2023 13:46:33 PAGE 2   
+
+  51   1              TIMER_slowTick = false;
+  52   1      
+  53   1              if (TIMER_IsrTick) {
+  54   2                      TIMER_IsrTick = false;
+  55   2      
+  56   2                      if (++TIMER_FastCount == (TIMER_FAST_TICK_MS/TIMER_CORE_TICK_MS)) {
+  57   3                              TIMER_FastCount = 0;
+  58   3                              TIMER_fastTick = true;
+  59   3                      }
+  60   2      
+  61   2                      if (++TIMER_SlowCount == (TIMER_SLOW_TICK_MS/TIMER_CORE_TICK_MS)) {
+  62   3                              TIMER_SlowCount = 0;
+  63   3                              TIMER_slowTick = true;
+  64   3                      }
+  65   2              }
+  66   1      }
+  67          
+  68          
+  69          
+  70          //-----------------------------------------------------------------------------
+  71          // TIMER2 ISR
+  72          //-----------------------------------------------------------------------------
+  73          SI_INTERRUPT (TIMER2_ISR, TIMER2_IRQn)
+  74          {
+  75   1          // Overflows every 10 ms
+  76   1          TMR2CN0 &= ~TMR2CN0_TF2H__BMASK;
+  77   1      
+  78   1          TIMER_IsrTick = true;
+  79   1      }
+C51 COMPILER V9.60.0.0   TIMER                                                             02/10/2023 13:46:33 PAGE 3   
+
+ASSEMBLY LISTING OF GENERATED OBJECT CODE
+
+
+             ; FUNCTION TIMER_Init (BEGIN)
+                                           ; SOURCE LINE # 38
+                                           ; SOURCE LINE # 39
+                                           ; SOURCE LINE # 40
+0000 C200        R     CLR     TIMER_IsrTick
+                                           ; SOURCE LINE # 41
+0002 E4                CLR     A
+0003 7800        R     MOV     R0,#LOW TIMER_FastCount
+0005 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 42
+0006 08                INC     R0
+0007 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 43
+0008 22                RET     
+             ; FUNCTION TIMER_Init (END)
+
+             ; FUNCTION TIMER_Update (BEGIN)
+                                           ; SOURCE LINE # 47
+                                           ; SOURCE LINE # 48
+                                           ; SOURCE LINE # 50
+0000 C200        R     CLR     TIMER_fastTick
+                                           ; SOURCE LINE # 51
+0002 C200        R     CLR     TIMER_slowTick
+                                           ; SOURCE LINE # 53
+0004 30001A            JNB     TIMER_IsrTick,?C0005
+                                           ; SOURCE LINE # 54
+0007 C200        R     CLR     TIMER_IsrTick
+                                           ; SOURCE LINE # 56
+0009 7800        R     MOV     R0,#LOW TIMER_FastCount
+000B E2                MOVX    A,@R0
+000C 04                INC     A
+000D F2                MOVX    @R0,A
+000E 6401              XRL     A,#01H
+0010 7003              JNZ     ?C0003
+                                           ; SOURCE LINE # 57
+0012 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 58
+0013 D200        R     SETB    TIMER_fastTick
+                                           ; SOURCE LINE # 59
+0015         ?C0003:
+                                           ; SOURCE LINE # 61
+0015 7800        R     MOV     R0,#LOW TIMER_SlowCount
+0017 E2                MOVX    A,@R0
+0018 04                INC     A
+0019 F2                MOVX    @R0,A
+001A 6419              XRL     A,#019H
+001C 7003              JNZ     ?C0005
+                                           ; SOURCE LINE # 62
+001E F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 63
+001F D200        R     SETB    TIMER_slowTick
+                                           ; SOURCE LINE # 64
+                                           ; SOURCE LINE # 65
+                                           ; SOURCE LINE # 66
+0021         ?C0005:
+0021 22                RET     
+             ; FUNCTION TIMER_Update (END)
+
+             ; FUNCTION TIMER2_ISR (BEGIN)
+                                           ; SOURCE LINE # 73
+C51 COMPILER V9.60.0.0   TIMER                                                             02/10/2023 13:46:33 PAGE 4   
+
+                                           ; SOURCE LINE # 76
+0000 53C87F            ANL     TMR2CN0,#07FH
+                                           ; SOURCE LINE # 78
+0003 D200        R     SETB    TIMER_IsrTick
+                                           ; SOURCE LINE # 79
+0005 32                RETI    
+             ; FUNCTION TIMER2_ISR (END)
+
+C51 COMPILER V9.60.0.0   TIMER                                                             02/10/2023 13:46:33 PAGE 5   
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+SPI0CKR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A2H  1
+uint16_t . . . . . . . . . . . . . . .  TYPEDEF  -----  U_INT    -----  2
+P0 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0080H  1
+TIMER_FastCount. . . . . . . . . . . .  PUBLIC   PDATA  U_CHAR   0000H  1
+PSW_OV . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D2H  1
+XOSC0CN. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B1H  1
+P1 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0090H  1
+P2 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A0H  1
+uint64_t . . . . . . . . . . . . . . .  TYPEDEF  -----  ARRAY    -----  8
+ADC0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0097H  1
+SI_GEN_PTR_t . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  3
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  3
+  gptr . . . . . . . . . . . . . . . .  MEMBER   -----  STRUCT   0000H  3
+TIMER2_ISR . . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+SMB0CN0_MASTER . . . . . . . . . . . .  ABSBIT   -----  BIT      00C7H  1
+PCA0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00F9H  2
+RTC0KEY. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AEH  1
+EIE1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E6H  1
+SMB0CN0_ACK. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C1H  1
+EIE2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E7H  1
+int32_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  LONG     -----  4
+PSCTL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008FH  1
+IT01CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E4H  1
+CS0CN0 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B0H  1
+int16_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  INT      -----  2
+SMB0CN0_TXMODE . . . . . . . . . . . .  ABSBIT   -----  BIT      00C6H  1
+DERIVID. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E3H  1
+CS0MD1 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AFH  1
+SFRPAGE. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A7H  1
+CS0MD2 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F3H  1
+P0MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A4H  1
+CS0MD3 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F3H  1
+int64_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  ARRAY    -----  8
+P1MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A5H  1
+SI_UU32. . . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  4
+  u32. . . . . . . . . . . . . . . . .  MEMBER   -----  U_LONG   0000H  4
+  s32. . . . . . . . . . . . . . . . .  MEMBER   -----  LONG     0000H  4
+  uu16 . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+ADC0CN0_ADINT. . . . . . . . . . . . .  ABSBIT   -----  BIT      00EDH  1
+TMR2RLH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CBH  1
+P2MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A6H  1
+IE . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A8H  1
+false. . . . . . . . . . . . . . . . .  E_CONST  -----  U_CHAR   -----  1
+TMR3RLH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0093H  1
+SI_UU16. . . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  2
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  U_INT    0000H  2
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  INT      0000H  2
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+EIP1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F6H  1
+EIP2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F7H  1
+SCON0_RB8. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009AH  1
+TMR2RLL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CAH  1
+PCA0CPH0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FCH  1
+C51 COMPILER V9.60.0.0   TIMER                                                             02/10/2023 13:46:33 PAGE 6   
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+TMR3RLL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0092H  1
+PCA0CPH1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EAH  1
+GPTR_t . . . . . . . . . . . . . . . .  TYPEDEF  -----  STRUCT   -----  3
+  memtype. . . . . . . . . . . . . . .  MEMBER   -----  U_CHAR   0000H  1
+  address. . . . . . . . . . . . . . .  MEMBER   -----  UNION    0001H  2
+SCON0_TB8. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009BH  1
+CS0CN0_CSEN. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B7H  1
+B_B0 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F0H  1
+DP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0082H  2
+PCA0CPH2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ECH  1
+B_B1 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F1H  1
+ADC0GT . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00C3H  2
+B_B2 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F2H  1
+PCA0CPL0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FBH  1
+B_B3 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F3H  1
+PCA0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D9H  1
+PCA0CPM0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DAH  1
+PCA0CPL1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E9H  1
+TIMER_SlowCount. . . . . . . . . . . .  PUBLIC   PDATA  U_CHAR   0001H  1
+B_B4 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F4H  1
+PCA0CPM1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DBH  1
+PCA0CPL2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EBH  1
+B_B5 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F5H  1
+PCA0CPM2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DCH  1
+IP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B8H  1
+ADC0TK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BCH  1
+B_B6 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F6H  1
+ADC0LT . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00C5H  2
+IREF0CN0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D6H  1
+SCON0_MCE. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009DH  1
+B_B7 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F7H  1
+XBR0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E1H  1
+SMB0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C1H  1
+XBR1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E2H  1
+CS0SCAN0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D2H  1
+SMB0CN0_STA. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C5H  1
+XBR2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E3H  1
+CS0SCAN1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D3H  1
+ADC0MX . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0096H  1
+ACC_ACC0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E0H  1
+REF0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D1H  1
+HFO0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B2H  1
+CKCON0 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008EH  1
+TIMER_IsrTick. . . . . . . . . . . . .  PUBLIC   DATA   BIT      0000H  1
+ACC_ACC1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E1H  1
+REG0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C9H  1
+CRC0IN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0085H  1
+TIMER_fastTick . . . . . . . . . . . .  PUBLIC   DATA   BIT      0001H  1
+TMR2CN0_TR2. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CAH  1
+ACC_ACC2 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E2H  1
+ACC_ACC3 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E3H  1
+SP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0081H  1
+CMP0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009DH  1
+ACC_ACC4 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E4H  1
+PCA0CN0_CCF0 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D8H  1
+ACC_ACC5 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E5H  1
+PCA0CN0_CCF1 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D9H  1
+ACC_ACC6 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E6H  1
+C51 COMPILER V9.60.0.0   TIMER                                                             02/10/2023 13:46:33 PAGE 7   
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+TMR2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00CCH  2
+PCA0CN0_CCF2 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DAH  1
+ACC_ACC7 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E7H  1
+TMR3 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0094H  2
+CS0CN0_CSCMPF. . . . . . . . . . . . .  ABSBIT   -----  BIT      00B0H  1
+SMB0CN0_ACKRQ. . . . . . . . . . . . .  ABSBIT   -----  BIT      00C3H  1
+VDM0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FFH  1
+P0MDIN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F1H  1
+SCON0_REN. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009CH  1
+P1MDIN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F2H  1
+CS0THH . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FEH  1
+SMB0CN0_STO. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C4H  1
+PMU0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B5H  1
+P0MASK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C7H  1
+bool . . . . . . . . . . . . . . . . .  TYPEDEF  DATA   BIT      -----  1
+P1MASK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BFH  1
+SI_GEN_PTR . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  3
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  3
+  gptr . . . . . . . . . . . . . . . .  MEMBER   -----  STRUCT   0000H  3
+CS0THL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FDH  1
+PSW_RS0. . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D3H  1
+PCA0CN0_CF . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DFH  1
+SPI0CN0_RXOVRN . . . . . . . . . . . .  ABSBIT   -----  BIT      00FCH  1
+PSW_RS1. . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D4H  1
+TMR2CN0_T2XCLK0. . . . . . . . . . . .  ABSBIT   -----  BIT      00C8H  1
+TMR2CN0_T2XCLK1. . . . . . . . . . . .  ABSBIT   -----  BIT      00C9H  1
+ADC0CN0_ADEN . . . . . . . . . . . . .  ABSBIT   -----  BIT      00EFH  1
+TMOD . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0089H  1
+TCON . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0088H  1
+PMU0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B5H  1
+PMU0FL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CEH  1
+CRC0FLIP . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009CH  1
+PSW_PARITY . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D0H  1
+IE_ES0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ACH  1
+CMP0MX . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009FH  1
+IE_ET0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A9H  1
+TIMER_slowTick . . . . . . . . . . . .  PUBLIC   DATA   BIT      0002H  1
+IE_ET1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ABH  1
+P0SKIP . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D4H  1
+IE_ET2 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ADH  1
+P1SKIP . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D5H  1
+ADC0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E8H  1
+IE_EX0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A8H  1
+PCA0CN0_CR . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DEH  1
+IE_EX1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AAH  1
+SCON0_SMODE. . . . . . . . . . . . . .  ABSBIT   -----  BIT      009FH  1
+CLKSEL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A9H  1
+SPI0CN0_SPIEN. . . . . . . . . . . . .  ABSBIT   -----  BIT      00F8H  1
+B. . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F0H  1
+ADC0H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BEH  1
+true . . . . . . . . . . . . . . . . .  E_CONST  -----  U_CHAR   -----  1
+CRC0AUTO . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009EH  1
+CS0CN0_CSBUSY. . . . . . . . . . . . .  ABSBIT   -----  BIT      00B4H  1
+ADC0CN0_ADBMEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00EEH  1
+TMR2RL . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00CAH  2
+ADC0L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BDH  1
+TMR3RL . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0092H  2
+PCA0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D8H  1
+C51 COMPILER V9.60.0.0   TIMER                                                             02/10/2023 13:46:33 PAGE 8   
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+ACC. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E0H  1
+PCA0CP0. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00FBH  2
+TIMER_Update . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+PCA0CP1. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00E9H  2
+PCA0CP2. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00EBH  2
+CRC0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0084H  1
+TH0. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008CH  1
+IP_PS0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BCH  1
+TH1. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008DH  1
+PCA0H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FAH  1
+IP_PT0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B9H  1
+IP_PT1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BBH  1
+uint8_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  U_CHAR   -----  1
+SMB0CN0_ARBLOST. . . . . . . . . . . .  ABSBIT   -----  BIT      00C2H  1
+IP_PT2 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BDH  1
+TL0. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008AH  1
+CS0CF. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AAH  1
+SPI0CN0_TXBMT. . . . . . . . . . . . .  ABSBIT   -----  BIT      00F9H  1
+PSW_F0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D5H  1
+IE_ESPI0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AEH  1
+TL1. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008BH  1
+PCA0L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F9H  1
+SMB0CN0_SI . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C0H  1
+PSW_F1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D1H  1
+P0_B0. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0080H  1
+IP_PX0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B8H  1
+P1_B0. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0090H  1
+P0_B1. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0081H  1
+IP_PX1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BAH  1
+CS0DH. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EEH  1
+CMP0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009BH  1
+TCON_IE0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0089H  1
+P1_B1. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0091H  1
+P0_B2. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0082H  1
+TCON_IE1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008BH  1
+P1_B2. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0092H  1
+P0_B3. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0083H  1
+SMB0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C0H  1
+P1_B3. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0093H  1
+P0_B4. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0084H  1
+P1_B4. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0094H  1
+P0_B5. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0085H  1
+CS0DL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EDH  1
+P1_B5. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0095H  1
+P0_B6. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0086H  1
+P1_B6. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0096H  1
+P0_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0087H  1
+int8_t . . . . . . . . . . . . . . . .  TYPEDEF  -----  CHAR     -----  1
+P1_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0097H  1
+P2_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A7H  1
+DPH. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0083H  1
+ADC0GTH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C4H  1
+TMR2CN0_TF2H . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CFH  1
+TMR2CN0_T2SPLIT. . . . . . . . . . . .  ABSBIT   -----  BIT      00CBH  1
+PSW_AC . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D6H  1
+SPI0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F8H  1
+HFO0CAL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B3H  1
+CS0SE. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DEH  1
+C51 COMPILER V9.60.0.0   TIMER                                                             02/10/2023 13:46:33 PAGE 9   
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+TCON_TF0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008DH  1
+SCON0_RI . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0098H  1
+DPL. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0082H  1
+TCON_TF1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008FH  1
+SBUF0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0099H  1
+PCON0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0087H  1
+IREF0CF. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B9H  1
+ADC0GTL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C3H  1
+SI_UU32_t. . . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  4
+  u32. . . . . . . . . . . . . . . . .  MEMBER   -----  U_LONG   0000H  4
+  s32. . . . . . . . . . . . . . . . .  MEMBER   -----  LONG     0000H  4
+  uu16 . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+TMR2CN0_TF2L . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CEH  1
+SCON0_TI . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0099H  1
+ADC0CN0_ADCM0. . . . . . . . . . . . .  ABSBIT   -----  BIT      00E8H  1
+ADC0LTH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C6H  1
+TCON_IT0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0088H  1
+CS0CN0_CSPME . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B1H  1
+ADC0CN0_ADCM1. . . . . . . . . . . . .  ABSBIT   -----  BIT      00E9H  1
+RSTSRC . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EFH  1
+P0MAT. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D7H  1
+CRC0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0086H  1
+SI_UU16_t. . . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  2
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  U_INT    0000H  2
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  INT      0000H  2
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+TCON_IT1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008AH  1
+ADC0CN0_ADCM2. . . . . . . . . . . . .  ABSBIT   -----  BIT      00EAH  1
+SCON0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0098H  1
+P1MAT. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CFH  1
+CS0PM. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DEH  1
+ADC0CN0_ADWINT . . . . . . . . . . . .  ABSBIT   -----  BIT      00EBH  1
+ADC0CN0_ADBUSY . . . . . . . . . . . .  ABSBIT   -----  BIT      00ECH  1
+SMB0ADM. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F5H  1
+ADC0LTL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C5H  1
+SPI0CN0_MODF . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FDH  1
+IP_PSPI0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BEH  1
+CS0CN0_CSEOS . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B6H  1
+TMR2CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C8H  1
+TMR3CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0091H  1
+SMB0ADR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F4H  1
+TCON_TR0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008CH  1
+CS0CN0_CSINT . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B5H  1
+CS0MX. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ABH  1
+TMR2CN0_TF2CEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00CCH  1
+TCON_TR1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008EH  1
+SMB0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C2H  1
+P0DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0099H  1
+CS0SS. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DDH  1
+TMR2H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CDH  1
+SPI0CFG. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A1H  1
+P1DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009BH  1
+TMR3H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0095H  1
+C51 COMPILER V9.60.0.0   TIMER                                                             02/10/2023 13:46:33 PAGE 10  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+P2DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009DH  1
+CRC0CNT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009AH  1
+TMR2L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CCH  1
+RTC0ADR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ACH  1
+SPI0CN0_SPIF . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FFH  1
+TMR3L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0094H  1
+ADC0PWR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BBH  1
+IE_EA. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AFH  1
+RTC0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ADH  1
+CS0CN0_CSCMPEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00B3H  1
+FLSCL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B6H  1
+TMR2CN0_TF2LEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00CDH  1
+SPI0CN0_WCOL . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FEH  1
+SPI0CN0_NSSMD0 . . . . . . . . . . . .  ABSBIT   -----  BIT      00FAH  1
+PSW_CY . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D7H  1
+SPI0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A3H  1
+SPI0CN0_NSSMD1 . . . . . . . . . . . .  ABSBIT   -----  BIT      00FBH  1
+ADC0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00BDH  2
+TOFFH. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008EH  1
+TIMER_Init . . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+PSW. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D0H  1
+PCA0PWM. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DFH  1
+REVID. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E2H  1
+TOFFL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008DH  1
+FLKEY. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B7H  1
+uint32_t . . . . . . . . . . . . . . .  TYPEDEF  -----  U_LONG   -----  4
+ADC0AC . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BAH  1
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =     52    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =      2    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =      3    ----
+   EDATA SIZE       =   ----    ----
+   HDATA SIZE       =   ----    ----
+   XDATA CONST SIZE =   ----    ----
+   FAR CONST SIZE   =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

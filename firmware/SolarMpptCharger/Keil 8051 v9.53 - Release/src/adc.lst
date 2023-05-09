@@ -1,0 +1,2374 @@
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 1   
+
+
+C51 COMPILER V9.60.0.0, COMPILATION OF MODULE ADC
+OBJECT MODULE PLACED IN .\src/adc.OBJ
+COMPILER INVOKED BY: Z:\Applications\Simplicity Studio.app\Contents\Eclipse\developer\toolchains\keil_8051\9.60\BIN\C51.
+                    -exe /Users/danjulio/SimplicityStudio/v4_workspace/SolarMpptCharger/src/adc.c OMF2 COMPACT DEBUG OBJECTEXTEND ROM(LARGE) 
+                    -WARNINGLEVEL(2) FLOATFUZZY(3) OPTIMIZE(9,SPEED) DEFINE(NDEBUG=1) INTVECTOR(0X0000) INTPROMOTE INCDIR(/Users/danjulio/Sim
+                    -plicityStudio/v4_workspace/SolarMpptCharger/inc;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/8051
+                    -/v4.1.7//Device/shared/si8051Base;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/8051/v4.1.7//Devic
+                    -e/EFM8SB1/inc) REGFILE(SolarMpptCharger.ORC) PRINT(.\src/adc.lst) COND SYMBOLS CODE PAGEWIDTH(120) PAGELENGTH(65) OBJECT
+                    -(.\src/adc.OBJ)
+
+line level    source
+
+   1          /*
+   2           * adc.c
+   3           *
+   4           * ADC Measurement module
+   5           *  Implement an interrupt-driven sampling system for solar voltage and current, battery
+   6           *  voltage and current and internal/external temperature sensors.  TIMER0 IRQ triggers ADC
+   7           *  readings.  ADC IRQ used to update values.
+   8           *
+   9           * Functions:
+  10           *  1. Initialization
+  11           *    - Initialize filter used for noisy voltage and current measurements
+  12           *    - Read temp - initialize averaging array
+  13           *    - Enable timer + adc interrupts
+  14           *  2. Digitally filtered measurements for voltage and current to handle varying values that
+  15           *     make it through the external low-pass hardware filters.  Measurements made for each
+  16           *     voltage and current channel at approximately 1 kHz.
+  17           *  3. Skew TIMER0 reload value back and forth around the center sample rate so ADC samples
+  18           *     entire PWM waveform over the filter time constants.
+  19           *  4. Temperature sensor measurements every second and averaging over a several second period.
+  20           *  5. Value access routines for other modules and BattChargeCurrent estimation
+  21           *  6. BUCK regulator evaluation every ADC_BUCK_EVAL_MSEC mSec
+  22           *
+  23           * Copyright (c) 2018-2019 danjuliodesigns, LLC.  All rights reserved.
+  24           *
+  25           * SolarMpptCharger is free software: you can redistribute it and/or modify it
+  26           * under the terms of the GNU Lesser General Public License as published
+  27           * by the Free Software Foundation, either version 3 of the License, or
+  28           * (at your option) any later version.
+  29           *
+  30           * SolarMpptCharger is distributed in the hope that it will be useful,
+  31           * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  32           * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  33           * GNU Lesser General Public License for more details.
+  34           *
+  35           * See <http://www.gnu.org/licenses/>.
+  36           *
+  37           */
+  38          #include <SI_EFM8SB1_Register_Enums.h>
+  39          #include "intrins.h"
+  40          #include "adc.h"
+  41          #include "buck.h"
+  42          #include "config.h"
+  43          #include "watchdog.h"
+  44          
+  45          
+  46          //-----------------------------------------------------------------------------
+  47          // Module constants
+  48          //-----------------------------------------------------------------------------
+  49          
+  50          // ADC Inputs
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 2   
+
+  51          #define _ADC_VS_CH 5
+  52          #define _ADC_IS_CH 1
+  53          #define _ADC_VB_CH 2
+  54          #define _ADC_IB_CH 3
+  55          #define _ADC_TE_CH 4
+  56          #define _ADC_TI_CH 27
+  57          
+  58          // Timer0 reload min/max counts
+  59          //  Chosen to allow the sample point to skew around the entire PWM period to
+  60          //  more accurately measure a varying signal during that time.
+  61          //    - Skew around timer 0 reload base value of 0x80 (~250 uSec/sample)
+  62          //    - Timer 0 count = 1.96 uSec
+  63          //    - PWM Period = 41.8 uSec
+  64          //    => Minimum of 41.8/1.96 = 21.3 counts ==> ~ +/- 11 Timer 0 counts
+  65          #define _ADC_TH0_MIN 0x75
+  66          #define _ADC_TH0_MAX 0x8B
+  67          
+  68          
+  69          
+  70          //-----------------------------------------------------------------------------
+  71          // Internal Reference Calibration value - stored at the top of code memory,
+  72          // below the bootloader signature byte and the lock byte, so a calibrated
+  73          // value can be loaded into the processor by a production programmer.
+  74          //-----------------------------------------------------------------------------
+  75          SI_SEG_CODE int16_t adcVRefMv _at_ 0x1FFC;
+  76          
+  77          
+  78          
+  79          //-----------------------------------------------------------------------------
+  80          // Variables
+  81          //-----------------------------------------------------------------------------
+  82          
+  83          // Filtered measurement variables
+  84          volatile uint32_t SI_SEG_IDATA adcFilterSum[4];
+  85          volatile uint16_t SI_SEG_IDATA adcFilteredAdcVal[4];
+  86          
+  87          // Temperature measurement variables
+  88          volatile uint8_t SI_SEG_IDATA adcTempSensorIndex;
+  89          volatile uint16_t SI_SEG_IDATA adcTempAvgArray[2][ADC_NUM_TEMP_SMPLS];
+  90          volatile uint8_t SI_SEG_IDATA adcTempAvgIndex;
+  91          volatile uint16_t SI_SEG_IDATA adcTempExtAvgAdcVal;
+  92          volatile uint16_t SI_SEG_IDATA adcTempIntAvgAdcVal;
+  93          
+  94          // State management variables
+  95          volatile uint8_t SI_SEG_IDATA adcMeasIndex;                     // Current index being measured
+  96          volatile uint8_t SI_SEG_IDATA adcStoredMeasIndex;   // Index to restore after temperature measurement "int
+             -erruption"
+  97          volatile uint16_t SI_SEG_IDATA adcTempMeasCount;        // Counts down series between temperature measurements (s
+             -low)
+  98          volatile uint8_t SI_SEG_IDATA adcBuckEvalCount;         // Counts down series of measurements between BUCK evals
+  99          
+ 100          // Timer 0 sample control
+ 101          volatile uint8_t SI_SEG_IDATA adcTimer0Reload;
+ 102          volatile bit adcTimer0ReloadInc;
+ 103          
+ 104          
+ 105          
+ 106          //-----------------------------------------------------------------------------
+ 107          // Forward declarations for internal functions
+ 108          //-----------------------------------------------------------------------------
+ 109          void _ADC_DelayMsec(uint8_t mSec);
+ 110          uint16_t _ADC_GetSingleReading(uint8_t adcChannel);
+ 111          void _ADC_PushFilteredVal(uint16_t val, uint8_t index);
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 3   
+
+ 112          void _ADC_PushTemp(uint16_t val, uint8_t Tindex);
+ 113          uint16_t _adc2mV(uint16_t adcVal);
+ 114          uint16_t _adc2mA(uint16_t adcVal);
+ 115          int16_t _adc2ExtT10(uint16_t adcVal);
+ 116          int16_t _adc2IntT10(uint16_t adcVal);
+ 117          uint16_t _adcIsr2mV(uint16_t adcVal);
+ 118          uint16_t _adcIsr2mA(uint16_t adcVal);
+ 119          
+ 120          
+ 121          
+ 122          //-----------------------------------------------------------------------------
+ 123          // API Routines
+ 124          //-----------------------------------------------------------------------------
+ 125          void ADC_Init()
+ 126          {
+ 127   1              uint8_t i;
+ 128   1      
+ 129   1              // Make sure ADC Interrupts are disabled so ISRs don't fire while we're initializing
+ 130   1              _ADC_DIS_INT();
+ 131   1      
+ 132   1              // Delay to allow voltages to stabilize
+ 133   1              _ADC_DelayMsec(50);
+ 134   1      
+ 135   1              // Initialize variables
+ 136   1              adcMeasIndex = 0;
+ 137   1              adcTempSensorIndex = ADC_TEMP_INT;
+ 138   1              adcTempMeasCount = ADC_TEMP_EVAL_COUNT;
+ 139   1              adcBuckEvalCount = ADC_BUCK_EVAL_COUNT;
+ 140   1              adcTimer0Reload = 0x80;
+ 141   1              adcTimer0ReloadInc = 1;
+ 142   1      
+ 143   1              // Setup the filtered ADC value filters
+ 144   1              adcFilteredAdcVal[ADC_MEAS_VS_INDEX] = _ADC_GetSingleReading(_ADC_VS_CH);
+ 145   1              adcFilterSum[ADC_MEAS_VS_INDEX] = (adcFilteredAdcVal[ADC_MEAS_VS_INDEX] << ADC_V_FILTER_SHIFT);
+ 146   1              adcFilteredAdcVal[ADC_MEAS_IS_INDEX] = _ADC_GetSingleReading(_ADC_IS_CH);
+ 147   1              adcFilterSum[ADC_MEAS_IS_INDEX] = (adcFilteredAdcVal[ADC_MEAS_IS_INDEX] << ADC_I_FILTER_SHIFT);
+ 148   1              adcFilteredAdcVal[ADC_MEAS_VB_INDEX] = _ADC_GetSingleReading(_ADC_VB_CH);
+ 149   1              adcFilterSum[ADC_MEAS_VB_INDEX] = (adcFilteredAdcVal[ADC_MEAS_VB_INDEX] << ADC_V_FILTER_SHIFT);
+ 150   1              adcFilteredAdcVal[ADC_MEAS_IB_INDEX] = _ADC_GetSingleReading(_ADC_IB_CH);
+ 151   1              adcFilterSum[ADC_MEAS_IB_INDEX] = (adcFilteredAdcVal[ADC_MEAS_IB_INDEX] << ADC_I_FILTER_SHIFT);
+ 152   1      
+ 153   1              // Load the temperature averaging arrays
+ 154   1              adcTempExtAvgAdcVal = _ADC_GetSingleReading(_ADC_TE_CH);
+ 155   1              for (i=0; i<ADC_NUM_TEMP_SMPLS; i++) {
+ 156   2                      adcTempAvgArray[ADC_TEMP_EXT][i] = adcTempExtAvgAdcVal;
+ 157   2              }
+ 158   1              adcTempIntAvgAdcVal = _ADC_GetSingleReading(_ADC_TI_CH);
+ 159   1              for (i=0; i<ADC_NUM_TEMP_SMPLS; i++) {
+ 160   2                      adcTempAvgArray[ADC_TEMP_INT][i] = adcTempIntAvgAdcVal;
+ 161   2              }
+ 162   1      
+ 163   1              // Configure the ADC input for the initial reading
+ 164   1              ADC0MX = _ADC_VS_CH;
+ 165   1      
+ 166   1              // Enable Timer0
+ 167   1              TCON_TR0 = 1;
+ 168   1      
+ 169   1              // Enable ADC Interrupts
+ 170   1              _ADC_EN_INT();
+ 171   1      }
+ 172          
+ 173          
+ 174          // Designed to be called by code from the main loop thread
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 4   
+
+ 175          int16_t ADC_GetValue(uint8_t index)
+ 176          {
+ 177   1              uint16_t t1;
+ 178   1      
+ 179   1              // Atomically sample current value to prevent ISR from updating it halfway
+ 180   1              // through our access
+ 181   1              switch (index) {
+ 182   2              case ADC_MEAS_VS_INDEX:
+ 183   2                      _ADC_DIS_INT();
+ 184   2                      t1 = adcFilteredAdcVal[ADC_MEAS_VS_INDEX];
+ 185   2                      _ADC_EN_INT();
+ 186   2                      return(_adc2mV(t1));
+ 187   2              case ADC_MEAS_IS_INDEX:
+ 188   2                      _ADC_DIS_INT();
+ 189   2                      t1 = adcFilteredAdcVal[ADC_MEAS_IS_INDEX];
+ 190   2                      _ADC_EN_INT();
+ 191   2                      return(_adc2mA(t1));
+ 192   2              case ADC_MEAS_VB_INDEX:
+ 193   2                      _ADC_DIS_INT();
+ 194   2                      t1 = adcFilteredAdcVal[ADC_MEAS_VB_INDEX];
+ 195   2                      _ADC_EN_INT();
+ 196   2                      return(_adc2mV(t1));
+ 197   2              case ADC_MEAS_IB_INDEX:
+ 198   2                      _ADC_DIS_INT();
+ 199   2                      t1 = adcFilteredAdcVal[ADC_MEAS_IB_INDEX];
+ 200   2                      _ADC_EN_INT();
+ 201   2                      return(_adc2mA(t1));
+ 202   2              case ADC_MEAS_TI_INDEX:
+ 203   2                      _ADC_DIS_INT();
+ 204   2                      t1 = adcTempIntAvgAdcVal;
+ 205   2                      _ADC_EN_INT();
+ 206   2                      return(_adc2IntT10(t1));
+ 207   2              case ADC_MEAS_TE_INDEX:
+ 208   2                      _ADC_DIS_INT();
+ 209   2                      t1 = adcTempExtAvgAdcVal;
+ 210   2                      _ADC_EN_INT();
+ 211   2                      return(_adc2ExtT10(t1));
+ 212   2              default:
+ 213   2                      return(0);
+ 214   2              }
+ 215   1      }
+ 216          
+ 217          
+ 218          // Designed to be called by BUCK module executing in Timer0 ISR (minimal functionality necessary)
+ 219          uint16_t ADC_GetValueForIsr(uint8_t index)
+ 220          {
+ 221   1              switch (index) {
+ 222   2                      case ADC_MEAS_VS_INDEX:
+ 223   2                              return(_adcIsr2mV(adcFilteredAdcVal[ADC_MEAS_VS_INDEX]));
+ 224   2                      case ADC_MEAS_IS_INDEX:
+ 225   2                              return(_adcIsr2mA(adcFilteredAdcVal[ADC_MEAS_IS_INDEX]));
+ 226   2                      case ADC_MEAS_VB_INDEX:
+ 227   2                              return(_adcIsr2mV(adcFilteredAdcVal[ADC_MEAS_VB_INDEX]));
+ 228   2                      default:
+ 229   2                              return(0);
+ 230   2              }
+ 231   1      }
+ 232          
+ 233          
+ 234          
+ 235          //-----------------------------------------------------------------------------
+ 236          // Interrupt Handlers
+ 237          //-----------------------------------------------------------------------------
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 5   
+
+ 238          // TIMER0_IRQ requires ~1.3 - 1.5 uSec typically, ~148-163 uSec when BUCK_Update runs
+ 239          SI_INTERRUPT (TIMER0_ISR, TIMER0_IRQn)
+ 240          {
+ 241   1              // Evaluate the BUCK Buck regulator if time
+ 242   1              if (--adcBuckEvalCount == 0) {
+ 243   2                      adcBuckEvalCount = ADC_BUCK_EVAL_COUNT;
+ 244   2                      BUCK_Update();
+ 245   2              }
+ 246   1      
+ 247   1              // Trigger an ADC reading
+ 248   1              ADC0CN0_ADBUSY = 1;
+ 249   1      
+ 250   1              // Update the reload value to skew the period between samples
+ 251   1              if (adcTimer0ReloadInc == 1) {
+ 252   2                      if (++adcTimer0Reload == _ADC_TH0_MAX) {
+ 253   3                              adcTimer0ReloadInc = 0;
+ 254   3                      }
+ 255   2              } else {
+ 256   2                      if (--adcTimer0Reload == _ADC_TH0_MIN) {
+ 257   3                              adcTimer0ReloadInc = 1;
+ 258   3                      }
+ 259   2              }
+ 260   1              TH0 = adcTimer0Reload;
+ 261   1      
+ 262   1              // Clear TCON::TF0 (Timer 0 Overflow Flag) - done by HW on entry to ISR
+ 263   1      }
+ 264          
+ 265          
+ 266          // ADC0E0C_IRQ requires ~19-32 uSec
+ 267          SI_INTERRUPT (ADC0EOC_ISR, ADC0EOC_IRQn)
+ 268          {
+ 269   1              // Store the ADC result
+ 270   1              if (adcMeasIndex <= ADC_MEAS_IB_INDEX) {
+ 271   2                      _ADC_PushFilteredVal(ADC0, adcMeasIndex);
+ 272   2              } else {
+ 273   2                      // Temperature
+ 274   2                      _ADC_PushTemp(ADC0, adcTempSensorIndex);
+ 275   2              }
+ 276   1      
+ 277   1              // Setup the next ADC reading
+ 278   1              if ((adcMeasIndex == ADC_MEAS_TI_INDEX) || (adcMeasIndex == ADC_MEAS_TE_INDEX)) {
+ 279   2                      // Restore normal operation
+ 280   2                      adcMeasIndex = adcStoredMeasIndex;
+ 281   2              } else {
+ 282   2                      // Setup for next channel
+ 283   2                      if (++adcMeasIndex > ADC_MEAS_IB_INDEX) {
+ 284   3                              adcMeasIndex = 0;
+ 285   3                      }
+ 286   2                      if (--adcTempMeasCount == 0) {
+ 287   3                              // Setup special case of occasional temperature measurement
+ 288   3                              adcTempMeasCount = ADC_TEMP_EVAL_COUNT; // Reset temperature timer
+ 289   3                              adcStoredMeasIndex = adcMeasIndex;      // Save current normal channel to restore
+ 290   3      
+ 291   3                              // Setup temperature channel for next measurement (alternate between temp channels)
+ 292   3                              if (adcTempSensorIndex == ADC_TEMP_EXT) {
+ 293   4                                      adcMeasIndex = ADC_MEAS_TI_INDEX;   // Internal temperature sensor
+ 294   4                                      adcTempSensorIndex = ADC_TEMP_INT;  // Next temp will be internal
+ 295   4                              } else {
+ 296   4                                      adcMeasIndex = ADC_MEAS_TE_INDEX;   // External temperature sensor
+ 297   4                                      adcTempSensorIndex = ADC_TEMP_EXT;  // Next temp will be external
+ 298   4                              }
+ 299   3                      }
+ 300   2              }
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 6   
+
+ 301   1      
+ 302   1              // Configure the ADC input for the next reading
+ 303   1              switch (adcMeasIndex) {
+ 304   2              case ADC_MEAS_VS_INDEX:
+ 305   2                      ADC0MX = _ADC_VS_CH;
+ 306   2                      break;
+ 307   2              case ADC_MEAS_IS_INDEX:
+ 308   2                      ADC0MX = _ADC_IS_CH;
+ 309   2                      break;
+ 310   2              case ADC_MEAS_VB_INDEX:
+ 311   2                      ADC0MX = _ADC_VB_CH;
+ 312   2                      break;
+ 313   2              case ADC_MEAS_IB_INDEX:
+ 314   2                      ADC0MX = _ADC_IB_CH;
+ 315   2                      break;
+ 316   2              case ADC_MEAS_TI_INDEX:
+ 317   2                      ADC0MX = _ADC_TI_CH;
+ 318   2                      break;
+ 319   2              default:
+ 320   2                      ADC0MX = _ADC_TE_CH;
+ 321   2              }
+ 322   1      
+ 323   1              // Clear ADC0CN0::ADINT (Conversion Complete Interrupt Flag)
+ 324   1              ADC0CN0_ADINT = 0;
+ 325   1      }
+ 326          
+ 327          
+ 328          
+ 329          //-----------------------------------------------------------------------------
+ 330          // Internal Routines
+ 331          //-----------------------------------------------------------------------------
+ 332          
+ 333          // Delay function designed for use during initialization - ADC/Timer0 interrupts must be disabled
+ 334          void _ADC_DelayMsec(uint8_t mSec)
+ 335          {
+ 336   1              uint8_t i;
+ 337   1      
+ 338   1              // Uses Timer0 overflow at ~250 uSec
+ 339   1              TCON_TF0 = 0;  // Clear overflow flag
+ 340   1              TL0 = TH0;     // Manually set timer for first time
+ 341   1              TCON_TR0 = 1;  // Enable Timer 0
+ 342   1              while (mSec--) {
+ 343   2                      for (i=0; i<4; i++) {
+ 344   3                              // Spin until timer overflows
+ 345   3                              while (TCON_TF0 != 1) {};
+ 346   3      
+ 347   3                              // Reset for next period
+ 348   3                              TCON_TF0 = 0;
+ 349   3                      }
+ 350   2                      WD_Reset();
+ 351   2              }
+ 352   1      
+ 353   1              // Disable Timer 0
+ 354   1              TCON_TR0 = 0;
+ 355   1              TCON_TF0 = 0;
+ 356   1      }
+ 357          
+ 358          
+ 359          // Single ADC measurement - ADC Interrupts must be disabled
+ 360          uint16_t _ADC_GetSingleReading(uint8_t adcChannel)
+ 361          {
+ 362   1              // Set the ADC Channel
+ 363   1              ADC0MX = adcChannel;
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 7   
+
+ 364   1      
+ 365   1              // Wait >5 uSec for input to settle
+ 366   1              _ADC_DelayMsec(10);
+ 367   1      
+ 368   1              // Trigger ADC
+ 369   1              ADC0CN0_ADINT = 0;
+ 370   1              ADC0CN0_ADBUSY = 1;
+ 371   1      
+ 372   1              // Wait for ADC to finish
+ 373   1              while (ADC0CN0_ADINT != 1) {};
+ 374   1              ADC0CN0_ADINT = 0;
+ 375   1      
+ 376   1              return(ADC0);
+ 377   1      }
+ 378          
+ 379          
+ 380          void _ADC_PushFilteredVal(uint16_t val, uint8_t index)
+ 381          {
+ 382   1              // Even indices are voltage, odd are current
+ 383   1              if (index & 0x01) {
+ 384   2                      // Update current filter with current sample
+ 385   2                      adcFilterSum[index] = adcFilterSum[index] - (adcFilterSum[index] >> ADC_I_FILTER_SHIFT) + val;
+ 386   2      
+ 387   2                      // Scale for unity gain
+ 388   2                      adcFilteredAdcVal[index] = adcFilterSum[index] >> ADC_I_FILTER_SHIFT;
+ 389   2              } else {
+ 390   2                      // Update current filter with current sample
+ 391   2                      adcFilterSum[index] = adcFilterSum[index] - (adcFilterSum[index] >> ADC_V_FILTER_SHIFT) + val;
+ 392   2      
+ 393   2                      // Scale for unity gain
+ 394   2                      adcFilteredAdcVal[index] = adcFilterSum[index] >> ADC_V_FILTER_SHIFT;
+ 395   2              }
+ 396   1      }
+ 397          
+ 398          
+ 399          void _ADC_PushTemp(uint16_t val, uint8_t Tindex)
+ 400          {
+ 401   1              uint8_t i;
+ 402   1              uint16_t tempAvgAdcVal = 0;
+ 403   1      
+ 404   1              // Push current value
+ 405   1              adcTempAvgArray[Tindex][adcTempAvgIndex] = val;
+ 406   1              if (Tindex == ADC_TEMP_EXT) {
+ 407   2                      // Only increment after second sensor measured
+ 408   2                      if (++adcTempAvgIndex == ADC_NUM_TEMP_SMPLS) adcTempAvgIndex = 0;
+ 409   2              }
+ 410   1      
+ 411   1              // Compute current averaged ADC value
+ 412   1              tempAvgAdcVal = 0;
+ 413   1              for (i=0; i<ADC_NUM_TEMP_SMPLS; i++) {
+ 414   2                      tempAvgAdcVal += adcTempAvgArray[Tindex][i];
+ 415   2              }
+ 416   1      
+ 417   1              // Round up the pre-divided value if necessary and then scale to divide
+ 418   1              if (tempAvgAdcVal & ADC_TEMP_RND_MASK) {
+ 419   2                      // Round up unshifted sum
+ 420   2                      tempAvgAdcVal += ADC_TEMP_RND_MASK;
+ 421   2              }
+ 422   1              tempAvgAdcVal = tempAvgAdcVal >> ADC_TEMP_SHIFT;
+ 423   1      
+ 424   1              if (Tindex == ADC_TEMP_INT) {
+ 425   2                      adcTempIntAvgAdcVal = tempAvgAdcVal;
+ 426   2              } else {
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 8   
+
+ 427   2                      adcTempExtAvgAdcVal = tempAvgAdcVal;
+ 428   2              }
+ 429   1      }
+ 430          
+ 431          
+ 432          // Compute a voltage reading in mV from the ADC raw count
+ 433          //  mV = (ADC_COUNT * VREF * V_SF) / 4092
+ 434          //
+ 435          uint16_t _adc2mV(uint16_t adcVal)
+ 436          {
+ 437   1              uint32_t t = (uint32_t) adcVal * adcVRefMv * V_SF;
+ 438   1              t = t / 4092;
+ 439   1              return (t);
+ 440   1      }
+ 441          
+ 442          
+ 443          // Compute a voltage reading in mV from the ADC raw count (ISR version)
+ 444          //  mV = (ADC_COUNT * VREF * V_SF) / 4092
+ 445          //
+ 446          uint16_t _adcIsr2mV(uint16_t adcVal)
+ 447          {
+ 448   1              uint32_t t = (uint32_t) adcVal * adcVRefMv * V_SF;
+ 449   1              t = t / 4092;
+ 450   1              return (t);
+ 451   1      }
+ 452          
+ 453          
+ 454          // Compute a current reading in mA from the ADC raw count
+ 455          //  mA = (ADC_COUNT * VREF) / (4092 * I_GAIN * I_RESISTOR) = (ADC_COUNT * VREF) / I_DIVISOR
+ 456          //
+ 457          uint16_t _adc2mA(uint16_t adcVal)
+ 458          {
+ 459   1              uint32_t t = (uint32_t) adcVal * adcVRefMv;
+ 460   1              t = t / I_DIVISOR;
+ 461   1              return (t);
+ 462   1      }
+ 463          
+ 464          
+ 465          // Compute a current reading in mA from the ADC raw count (ISR version)
+ 466          //  mA = (ADC_COUNT * VREF) / (4092 * I_GAIN * I_RESISTOR) = (ADC_COUNT * VREF) / I_DIVISOR
+ 467          //
+ 468          uint16_t _adcIsr2mA(uint16_t adcVal)
+ 469          {
+ 470   1              uint32_t t = (uint32_t) adcVal * adcVRefMv;
+ 471   1              t = t / I_DIVISOR;
+ 472   1              return (t);
+ 473   1      }
+ 474          
+ 475          
+ 476          // Return temp in units of C * 10
+ 477          //
+ 478          // Internal Temperature Sensor spec says slope is 3.4 mV/C and a 10-bit
+ 479          // measurement for each device is held in the TOFF register (measured
+ 480          // at 25C).  An offset for 0C can be calculated by subtracting the
+ 481          // computed ADC count for 25 degrees C from the TOFF register and
+ 482          // scaling to 12-bits.
+ 483          int16_t _adc2IntT10(uint16_t adcVal)
+ 484          {
+ 485   1              int32_t t;
+ 486   1      
+ 487   1              // Offset for 0-degree with internal calibration offset
+ 488   1              //   - Offset @ 0C is 940 mV nominal (12-bit ADC count = (940/ADC_VREF_MV)*4092 = 2331 ideal
+ 489   1              //   - {TOFFH[7:0], TOFFL[7:6]} contain 10-bit calibrated offset voltage
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 9   
+
+ 490   1              //   - Adjust ADC count to 0-degrees with calibration: adcVal - 2331 - 4*TOFF
+ 491   1              //
+ 492   1              t = 3846480 / adcVRefMv;
+ 493   1              t = (int32_t) adcVal - t;;
+ 494   1              t = t - (((int32_t) TOFFH << 4) | ((int32_t) TOFFL >> 4));
+ 495   1      
+ 496   1              // Compute temperature
+ 497   1              //   T_C_10 = (100*ADC_CAL_MV*ADC_VREF_MV)/(4092 * 34)
+ 498   1              t = t * adcVRefMv;
+ 499   1              t = t * 100;
+ 500   1              t = t / 139128;
+ 501   1      
+ 502   1              return (t);
+ 503   1      }
+ 504          
+ 505          
+ 506          // Return temp in units of C * 10
+ 507          //
+ 508          // External Temperature Sensor spec says slope is 10 mV/C and
+ 509          // the nominal calibration 500 mV offset for 0C for this device
+ 510          // and 12-bit ADC values (4092 * (500 mV/ADC_VREF_MV mV) = 1240 ideal).
+ 511          int16_t _adc2ExtT10(uint16_t adcVal)
+ 512          {
+ 513   1              int32_t t;
+ 514   1      
+ 515   1              // Offset for 0-degree
+ 516   1              t = 2046000 / adcVRefMv;
+ 517   1              t = (int32_t) adcVal - t;
+ 518   1      
+ 519   1              // Compute temperature
+ 520   1              //  T_C_10 = (ADC_CAL_MV*ADC_VREF_MV)/4092
+ 521   1              t = t * adcVRefMv;
+ 522   1              t = t / 4092;
+ 523   1      
+ 524   1              return (t);
+ 525   1      }
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 10  
+
+ASSEMBLY LISTING OF GENERATED OBJECT CODE
+
+
+             ; FUNCTION Com0056 (BEGIN)
+0000         L?0087:
+0000 F8                MOV     R0,A
+0001 120000      E     LCALL   ?C?LMUL
+0004         L?0088:
+0004 7800        R     MOV     R0,#LOW t
+0006 120000      E     LCALL   ?C?LSTPDATA
+0009 7800        R     MOV     R0,#LOW t
+000B         L?0089:
+000B E2                MOVX    A,@R0
+000C FC                MOV     R4,A
+000D 08                INC     R0
+000E E2                MOVX    A,@R0
+000F FD                MOV     R5,A
+0010         L?0090:
+0010 08                INC     R0
+0011 E2                MOVX    A,@R0
+0012 FE                MOV     R6,A
+0013 08                INC     R0
+0014 E2                MOVX    A,@R0
+0015 FF                MOV     R7,A
+0016 22                RET     
+0017         L?0091:
+0017         L?0092:
+0017 AB07              MOV     R3,AR7
+0019 AA06              MOV     R2,AR6
+001B E4                CLR     A
+001C F9                MOV     R1,A
+001D F8                MOV     R0,A
+001E 900000      R     MOV     DPTR,#adcVRefMv
+0021         L?0093:
+0021 93                MOVC    A,@A+DPTR
+0022 FE                MOV     R6,A
+0023 7401              MOV     A,#01H
+0025 93                MOVC    A,@A+DPTR
+0026 FF                MOV     R7,A
+0027 EE                MOV     A,R6
+0028 33                RLC     A
+0029 95E0              SUBB    A,ACC
+002B FD                MOV     R5,A
+002C FC                MOV     R4,A
+002D 22                RET     
+002E         L?0094:
+002E EB                MOV     A,R3
+002F 2F                ADD     A,R7
+0030 FF                MOV     R7,A
+0031 EA                MOV     A,R2
+0032 3E                ADDC    A,R6
+0033 FE                MOV     R6,A
+0034 ED                MOV     A,R5
+0035 39                ADDC    A,R1
+0036 FD                MOV     R5,A
+0037 EC                MOV     A,R4
+0038 38                ADDC    A,R0
+0039 FC                MOV     R4,A
+003A 7800        R     MOV     R0,#LOW index
+003C E2                MOVX    A,@R0
+003D FB                MOV     R3,A
+003E 25E0              ADD     A,ACC
+0040 25E0              ADD     A,ACC
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 11  
+
+0042 2400        R     ADD     A,#LOW adcFilterSum
+0044 F8                MOV     R0,A
+0045 120000      E     LCALL   ?C?LSTIDATA
+0048 EB                MOV     A,R3
+0049         L?0095:
+0049 25E0              ADD     A,ACC
+004B 25E0              ADD     A,ACC
+004D 2400        R     ADD     A,#LOW adcFilterSum
+004F F8                MOV     R0,A
+0050 020000      E     LJMP    ?C?LLDIDATA
+0053         L?0096:
+0053         L?0097:
+0053 E6                MOV     A,@R0
+0054 FF                MOV     R7,A
+0055 08                INC     R0
+0056 E6                MOV     A,@R0
+0057 7800        R     MOV     R0,#LOW t1
+0059 CF                XCH     A,R7
+005A F2                MOVX    @R0,A
+005B 08                INC     R0
+005C EF                MOV     A,R7
+005D F2                MOVX    @R0,A
+005E 43E608            ORL     EIE1,#08H
+0061 18                DEC     R0
+0062 E2                MOVX    A,@R0
+0063 FE                MOV     R6,A
+0064 08                INC     R0
+0065 E2                MOVX    A,@R0
+0066 FF                MOV     R7,A
+0067 22                RET     
+0068         L?0098:
+0068 E2                MOVX    A,@R0
+0069 FE                MOV     R6,A
+006A 08                INC     R0
+006B E2                MOVX    A,@R0
+006C FF                MOV     R7,A
+006D 08                INC     R0
+006E         L?0099:
+006E E2                MOVX    A,@R0
+006F FB                MOV     R3,A
+0070 08                INC     R0
+0071 E2                MOVX    A,@R0
+0072 F9                MOV     R1,A
+0073 08                INC     R0
+0074 E2                MOVX    A,@R0
+0075 FA                MOV     R2,A
+0076 08                INC     R0
+0077 E2                MOVX    A,@R0
+0078 CB                XCH     A,R3
+0079 22                RET     
+007A         L?0100:
+007A         L?0101:
+007A A606              MOV     @R0,AR6
+007C 08                INC     R0
+007D A607              MOV     @R0,AR7
+007F 18                DEC     R0
+0080 E6                MOV     A,@R0
+0081 FE                MOV     R6,A
+0082 08                INC     R0
+0083 E6                MOV     A,@R0
+0084 22                RET     
+0085         L?0102:
+0085 EE                MOV     A,R6
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 12  
+
+0086 F2                MOVX    @R0,A
+0087 08                INC     R0
+0088 EF                MOV     A,R7
+0089 F2                MOVX    @R0,A
+008A 900000      R     MOV     DPTR,#adcVRefMv
+008D E4                CLR     A
+008E 93                MOVC    A,@A+DPTR
+008F FE                MOV     R6,A
+0090 7401              MOV     A,#01H
+0092 93                MOVC    A,@A+DPTR
+0093 FB                MOV     R3,A
+0094 AA06              MOV     R2,AR6
+0096 EA                MOV     A,R2
+0097 33                RLC     A
+0098 95E0              SUBB    A,ACC
+009A F9                MOV     R1,A
+009B F8                MOV     R0,A
+009C 22                RET     
+009D         L?0103:
+009D A905              MOV     R1,AR5
+009F AA06              MOV     R2,AR6
+00A1 AB07              MOV     R3,AR7
+00A3 7800        R     MOV     R0,#LOW val
+00A5 E2                MOVX    A,@R0
+00A6 FE                MOV     R6,A
+00A7 08                INC     R0
+00A8 E2                MOVX    A,@R0
+00A9 FF                MOV     R7,A
+00AA E4                CLR     A
+00AB FC                MOV     R4,A
+00AC FD                MOV     R5,A
+00AD 22                RET     
+00AE         L?0104:
+00AE 7BFC              MOV     R3,#0FCH
+00B0 7A0F              MOV     R2,#0FH
+00B2         L?0105:
+00B2 E4                CLR     A
+00B3 F9                MOV     R1,A
+00B4 F8                MOV     R0,A
+00B5 020000      E     LJMP    ?C?ULDIV
+00B8         L?0106:
+00B8 FF                MOV     R7,A
+00B9 E4                CLR     A
+00BA FC                MOV     R4,A
+00BB FD                MOV     R5,A
+00BC 020000      E     LJMP    ?C?LSTIDATA
+00BF         L?0107:
+00BF F8                MOV     R0,A
+00C0 C3                CLR     C
+00C1 EF                MOV     A,R7
+00C2 9B                SUBB    A,R3
+00C3 FF                MOV     R7,A
+00C4 EE                MOV     A,R6
+00C5 9A                SUBB    A,R2
+00C6 FE                MOV     R6,A
+00C7 E4                CLR     A
+00C8 99                SUBB    A,R1
+00C9 FD                MOV     R5,A
+00CA E4                CLR     A
+00CB 98                SUBB    A,R0
+00CC FC                MOV     R4,A
+00CD 22                RET     
+00CE         L?0108:
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 13  
+
+00CE         L?0109:
+00CE EF                MOV     A,R7
+00CF C3                CLR     C
+00D0 9408              SUBB    A,#08H
+00D2 7480              MOV     A,#080H
+00D4 9480              SUBB    A,#080H
+00D6 22                RET     
+00D7         L?0110:
+00D7 C3                CLR     C
+00D8 EF                MOV     A,R7
+00D9 9B                SUBB    A,R3
+00DA FF                MOV     R7,A
+00DB EE                MOV     A,R6
+00DC 9A                SUBB    A,R2
+00DD FE                MOV     R6,A
+00DE ED                MOV     A,R5
+00DF 99                SUBB    A,R1
+00E0 FD                MOV     R5,A
+00E1 EC                MOV     A,R4
+00E2 98                SUBB    A,R0
+00E3 FC                MOV     R4,A
+00E4 22                RET     
+00E5         L?0111:
+00E5 120000      E     LCALL   ?C?LMUL
+00E8 E4                CLR     A
+00E9 7B0F              MOV     R3,#0FH
+00EB FA                MOV     R2,A
+00EC F9                MOV     R1,A
+00ED F8                MOV     R0,A
+00EE 020000      E     LJMP    ?C?LMUL
+             ; FUNCTION Com0056 (END)
+
+             ; FUNCTION ADC_Init (BEGIN)
+                                           ; SOURCE LINE # 125
+                                           ; SOURCE LINE # 126
+                                           ; SOURCE LINE # 130
+0000 53E6F7            ANL     EIE1,#0F7H
+                                           ; SOURCE LINE # 133
+0003 7F32              MOV     R7,#032H
+0005 120000      R     LCALL   __ADC_DelayMsec
+                                           ; SOURCE LINE # 136
+0008 E4                CLR     A
+0009 7800        R     MOV     R0,#LOW adcMeasIndex
+000B F6                MOV     @R0,A
+                                           ; SOURCE LINE # 137
+000C 7800        R     MOV     R0,#LOW adcTempSensorIndex
+000E F6                MOV     @R0,A
+                                           ; SOURCE LINE # 138
+000F 7800        R     MOV     R0,#LOW adcTempMeasCount
+0011 7607              MOV     @R0,#07H
+0013 08                INC     R0
+0014 76D0              MOV     @R0,#0D0H
+                                           ; SOURCE LINE # 139
+0016 7800        R     MOV     R0,#LOW adcBuckEvalCount
+0018 7614              MOV     @R0,#014H
+                                           ; SOURCE LINE # 140
+001A 7800        R     MOV     R0,#LOW adcTimer0Reload
+001C 7680              MOV     @R0,#080H
+                                           ; SOURCE LINE # 141
+001E D200        R     SETB    adcTimer0ReloadInc
+                                           ; SOURCE LINE # 144
+0020 7F05              MOV     R7,#05H
+0022 120000      R     LCALL   __ADC_GetSingleReading
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 14  
+
+0025 7800        R     MOV     R0,#LOW adcFilteredAdcVal
+                                           ; SOURCE LINE # 145
+0027 120000      R     LCALL   L?0100
+002A 7803              MOV     R0,#03H
+002C         ?C0075:
+002C C3                CLR     C
+002D 33                RLC     A
+002E CE                XCH     A,R6
+002F 33                RLC     A
+0030 CE                XCH     A,R6
+0031 D8F9              DJNZ    R0,?C0075
+0033 7800        R     MOV     R0,#LOW adcFilterSum
+0035 120000      R     LCALL   L?0106
+                                           ; SOURCE LINE # 146
+0038 7F01              MOV     R7,#01H
+003A 120000      R     LCALL   __ADC_GetSingleReading
+003D 7800        R     MOV     R0,#LOW adcFilteredAdcVal+02H
+                                           ; SOURCE LINE # 147
+003F 120000      R     LCALL   L?0100
+0042 7806              MOV     R0,#06H
+0044         ?C0076:
+0044 C3                CLR     C
+0045 33                RLC     A
+0046 CE                XCH     A,R6
+0047 33                RLC     A
+0048 CE                XCH     A,R6
+0049 D8F9              DJNZ    R0,?C0076
+004B 7800        R     MOV     R0,#LOW adcFilterSum+04H
+004D 120000      R     LCALL   L?0106
+                                           ; SOURCE LINE # 148
+0050 7F02              MOV     R7,#02H
+0052 120000      R     LCALL   __ADC_GetSingleReading
+0055 7800        R     MOV     R0,#LOW adcFilteredAdcVal+04H
+                                           ; SOURCE LINE # 149
+0057 120000      R     LCALL   L?0101
+005A 7803              MOV     R0,#03H
+005C         ?C0077:
+005C C3                CLR     C
+005D 33                RLC     A
+005E CE                XCH     A,R6
+005F 33                RLC     A
+0060 CE                XCH     A,R6
+0061 D8F9              DJNZ    R0,?C0077
+0063 FF                MOV     R7,A
+0064 E4                CLR     A
+0065 FC                MOV     R4,A
+0066 FD                MOV     R5,A
+0067 7800        R     MOV     R0,#LOW adcFilterSum+08H
+0069 120000      E     LCALL   ?C?LSTIDATA
+                                           ; SOURCE LINE # 150
+006C 7F03              MOV     R7,#03H
+006E 120000      R     LCALL   __ADC_GetSingleReading
+0071 7800        R     MOV     R0,#LOW adcFilteredAdcVal+06H
+                                           ; SOURCE LINE # 151
+0073 120000      R     LCALL   L?0101
+0076 7806              MOV     R0,#06H
+0078         ?C0078:
+0078 C3                CLR     C
+0079 33                RLC     A
+007A CE                XCH     A,R6
+007B 33                RLC     A
+007C CE                XCH     A,R6
+007D D8F9              DJNZ    R0,?C0078
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 15  
+
+007F FF                MOV     R7,A
+0080 E4                CLR     A
+0081 FC                MOV     R4,A
+0082 FD                MOV     R5,A
+0083 7800        R     MOV     R0,#LOW adcFilterSum+0CH
+0085 120000      E     LCALL   ?C?LSTIDATA
+                                           ; SOURCE LINE # 154
+0088 7F04              MOV     R7,#04H
+008A 120000      R     LCALL   __ADC_GetSingleReading
+008D 7800        R     MOV     R0,#LOW adcTempExtAvgAdcVal
+008F A606              MOV     @R0,AR6
+0091 08                INC     R0
+0092 A607              MOV     @R0,AR7
+                                           ; SOURCE LINE # 155
+;---- Variable 'i' assigned to Register 'R7' ----
+0094 E4                CLR     A
+0095 FF                MOV     R7,A
+0096         ?C0001:
+0096 120000      R     LCALL   L?0108
+0099 5015              JNC     ?C0002
+                                           ; SOURCE LINE # 156
+009B 7800        R     MOV     R0,#LOW adcTempExtAvgAdcVal
+009D E6                MOV     A,@R0
+009E FC                MOV     R4,A
+009F 08                INC     R0
+00A0 E6                MOV     A,@R0
+00A1 FD                MOV     R5,A
+00A2 EF                MOV     A,R7
+00A3 25E0              ADD     A,ACC
+00A5 2400        R     ADD     A,#LOW adcTempAvgArray+010H
+00A7 F8                MOV     R0,A
+00A8 A604              MOV     @R0,AR4
+00AA 08                INC     R0
+00AB A605              MOV     @R0,AR5
+                                           ; SOURCE LINE # 157
+00AD 0F                INC     R7
+00AE 80E6              SJMP    ?C0001
+00B0         ?C0002:
+                                           ; SOURCE LINE # 158
+00B0 7F1B              MOV     R7,#01BH
+00B2 120000      R     LCALL   __ADC_GetSingleReading
+00B5 7800        R     MOV     R0,#LOW adcTempIntAvgAdcVal
+00B7 A606              MOV     @R0,AR6
+00B9 08                INC     R0
+00BA A607              MOV     @R0,AR7
+                                           ; SOURCE LINE # 159
+00BC E4                CLR     A
+00BD FF                MOV     R7,A
+00BE         ?C0004:
+00BE 120000      R     LCALL   L?0108
+00C1 5015              JNC     ?C0005
+                                           ; SOURCE LINE # 160
+00C3 7800        R     MOV     R0,#LOW adcTempIntAvgAdcVal
+00C5 E6                MOV     A,@R0
+00C6 FC                MOV     R4,A
+00C7 08                INC     R0
+00C8 E6                MOV     A,@R0
+00C9 FD                MOV     R5,A
+00CA EF                MOV     A,R7
+00CB 25E0              ADD     A,ACC
+00CD 2400        R     ADD     A,#LOW adcTempAvgArray
+00CF F8                MOV     R0,A
+00D0 A604              MOV     @R0,AR4
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 16  
+
+00D2 08                INC     R0
+00D3 A605              MOV     @R0,AR5
+                                           ; SOURCE LINE # 161
+00D5 0F                INC     R7
+00D6 80E6              SJMP    ?C0004
+00D8         ?C0005:
+                                           ; SOURCE LINE # 164
+00D8 759605            MOV     ADC0MX,#05H
+                                           ; SOURCE LINE # 167
+00DB D28C              SETB    TCON_TR0
+                                           ; SOURCE LINE # 170
+00DD 43E608            ORL     EIE1,#08H
+                                           ; SOURCE LINE # 171
+00E0 22                RET     
+             ; FUNCTION ADC_Init (END)
+
+             ; FUNCTION _ADC_GetValue (BEGIN)
+                                           ; SOURCE LINE # 175
+;---- Variable 'index' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 176
+                                           ; SOURCE LINE # 181
+0000 EF                MOV     A,R7
+0001 14                DEC     A
+0002 6017              JZ      ?C0011
+0004 14                DEC     A
+0005 601B              JZ      ?C0012
+0007 14                DEC     A
+0008 6023              JZ      ?C0013
+000A 14                DEC     A
+000B 602B              JZ      ?C0014
+000D 14                DEC     A
+000E 6033              JZ      ?C0015
+0010 2405              ADD     A,#05H
+0012 703A              JNZ     ?C0016
+                                           ; SOURCE LINE # 182
+0014         ?C0009:
+                                           ; SOURCE LINE # 183
+0014 53E6F7            ANL     EIE1,#0F7H
+                                           ; SOURCE LINE # 184
+0017 7800        R     MOV     R0,#LOW adcFilteredAdcVal
+                                           ; SOURCE LINE # 185
+                                           ; SOURCE LINE # 186
+0019 800C              SJMP    ?C0081
+                                           ; SOURCE LINE # 187
+001B         ?C0011:
+                                           ; SOURCE LINE # 188
+001B 53E6F7            ANL     EIE1,#0F7H
+                                           ; SOURCE LINE # 189
+001E 7800        R     MOV     R0,#LOW adcFilteredAdcVal+02H
+                                           ; SOURCE LINE # 190
+                                           ; SOURCE LINE # 191
+0020 8010              SJMP    ?C0082
+                                           ; SOURCE LINE # 192
+0022         ?C0012:
+                                           ; SOURCE LINE # 193
+0022 53E6F7            ANL     EIE1,#0F7H
+                                           ; SOURCE LINE # 194
+0025 7800        R     MOV     R0,#LOW adcFilteredAdcVal+04H
+0027         ?C0081:
+                                           ; SOURCE LINE # 195
+                                           ; SOURCE LINE # 196
+0027 120000      R     LCALL   L?0096
+002A 020000      R     LJMP    __adc2mV
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 17  
+
+                                           ; SOURCE LINE # 197
+002D         ?C0013:
+                                           ; SOURCE LINE # 198
+002D 53E6F7            ANL     EIE1,#0F7H
+                                           ; SOURCE LINE # 199
+0030 7800        R     MOV     R0,#LOW adcFilteredAdcVal+06H
+0032         ?C0082:
+                                           ; SOURCE LINE # 200
+                                           ; SOURCE LINE # 201
+0032 120000      R     LCALL   L?0096
+0035 020000      R     LJMP    __adc2mA
+                                           ; SOURCE LINE # 202
+0038         ?C0014:
+                                           ; SOURCE LINE # 203
+0038 53E6F7            ANL     EIE1,#0F7H
+                                           ; SOURCE LINE # 204
+003B 7800        R     MOV     R0,#LOW adcTempIntAvgAdcVal
+                                           ; SOURCE LINE # 205
+                                           ; SOURCE LINE # 206
+003D 120000      R     LCALL   L?0097
+0040 020000      R     LJMP    __adc2IntT10
+                                           ; SOURCE LINE # 207
+0043         ?C0015:
+                                           ; SOURCE LINE # 208
+0043 53E6F7            ANL     EIE1,#0F7H
+                                           ; SOURCE LINE # 209
+0046 7800        R     MOV     R0,#LOW adcTempExtAvgAdcVal
+                                           ; SOURCE LINE # 210
+                                           ; SOURCE LINE # 211
+0048 120000      R     LCALL   L?0097
+004B 020000      R     LJMP    __adc2ExtT10
+                                           ; SOURCE LINE # 212
+004E         ?C0016:
+                                           ; SOURCE LINE # 213
+004E E4                CLR     A
+004F FE                MOV     R6,A
+0050 FF                MOV     R7,A
+                                           ; SOURCE LINE # 214
+                                           ; SOURCE LINE # 215
+0051         ?C0010:
+0051 22                RET     
+             ; FUNCTION _ADC_GetValue (END)
+
+             ; FUNCTION _ADC_GetValueForIsr (BEGIN)
+                                           ; SOURCE LINE # 219
+;---- Variable 'index' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 220
+                                           ; SOURCE LINE # 221
+0000 EF                MOV     A,R7
+0001 14                DEC     A
+0002 600B              JZ      ?C0020
+0004 14                DEC     A
+0005 6012              JZ      ?C0021
+0007 2402              ADD     A,#02H
+0009 7018              JNZ     ?C0022
+                                           ; SOURCE LINE # 222
+000B         ?C0018:
+                                           ; SOURCE LINE # 223
+000B 7800        R     MOV     R0,#LOW adcFilteredAdcVal
+000D 800C              SJMP    ?C0083
+                                           ; SOURCE LINE # 224
+000F         ?C0020:
+                                           ; SOURCE LINE # 225
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 18  
+
+000F 7800        R     MOV     R0,#LOW adcFilteredAdcVal+02H
+0011 E6                MOV     A,@R0
+0012 FE                MOV     R6,A
+0013 08                INC     R0
+0014 E6                MOV     A,@R0
+0015 FF                MOV     R7,A
+0016 020000      R     LJMP    __adcIsr2mA
+                                           ; SOURCE LINE # 226
+0019         ?C0021:
+                                           ; SOURCE LINE # 227
+0019 7800        R     MOV     R0,#LOW adcFilteredAdcVal+04H
+001B         ?C0083:
+001B E6                MOV     A,@R0
+001C FE                MOV     R6,A
+001D 08                INC     R0
+001E E6                MOV     A,@R0
+001F FF                MOV     R7,A
+0020 020000      R     LJMP    __adcIsr2mV
+                                           ; SOURCE LINE # 228
+0023         ?C0022:
+                                           ; SOURCE LINE # 229
+0023 E4                CLR     A
+0024 FE                MOV     R6,A
+0025 FF                MOV     R7,A
+                                           ; SOURCE LINE # 230
+                                           ; SOURCE LINE # 231
+0026         ?C0019:
+0026 22                RET     
+             ; FUNCTION _ADC_GetValueForIsr (END)
+
+             ; FUNCTION TIMER0_ISR (BEGIN)
+0000 C0E0              PUSH    ACC
+0002 C0F0              PUSH    B
+0004 C083              PUSH    DPH
+0006 C082              PUSH    DPL
+0008 C0D0              PUSH    PSW
+000A 75D000            MOV     PSW,#00H
+000D C000              PUSH    AR0
+000F C001              PUSH    AR1
+0011 C002              PUSH    AR2
+0013 C003              PUSH    AR3
+0015 C004              PUSH    AR4
+0017 C005              PUSH    AR5
+0019 C006              PUSH    AR6
+001B C007              PUSH    AR7
+                                           ; SOURCE LINE # 239
+                                           ; SOURCE LINE # 242
+001D 7800        R     MOV     R0,#LOW adcBuckEvalCount
+001F 16                DEC     @R0
+0020 E6                MOV     A,@R0
+0021 7005              JNZ     ?C0023
+                                           ; SOURCE LINE # 243
+0023 7614              MOV     @R0,#014H
+                                           ; SOURCE LINE # 244
+0025 120000      E     LCALL   BUCK_Update
+                                           ; SOURCE LINE # 245
+0028         ?C0023:
+                                           ; SOURCE LINE # 248
+0028 D2EC              SETB    ADC0CN0_ADBUSY
+                                           ; SOURCE LINE # 251
+002A 30000C            JNB     adcTimer0ReloadInc,?C0024
+                                           ; SOURCE LINE # 252
+002D 7800        R     MOV     R0,#LOW adcTimer0Reload
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 19  
+
+002F 06                INC     @R0
+0030 E6                MOV     A,@R0
+0031 648B              XRL     A,#08BH
+0033 700E              JNZ     ?C0026
+                                           ; SOURCE LINE # 253
+0035 C200        R     CLR     adcTimer0ReloadInc
+                                           ; SOURCE LINE # 254
+                                           ; SOURCE LINE # 255
+0037 800A              SJMP    ?C0026
+0039         ?C0024:
+                                           ; SOURCE LINE # 256
+0039 7800        R     MOV     R0,#LOW adcTimer0Reload
+003B 16                DEC     @R0
+003C E6                MOV     A,@R0
+003D 6475              XRL     A,#075H
+003F 7002              JNZ     ?C0026
+                                           ; SOURCE LINE # 257
+0041 D200        R     SETB    adcTimer0ReloadInc
+                                           ; SOURCE LINE # 258
+                                           ; SOURCE LINE # 259
+0043         ?C0026:
+                                           ; SOURCE LINE # 260
+0043 7800        R     MOV     R0,#LOW adcTimer0Reload
+0045 E6                MOV     A,@R0
+0046 F58C              MOV     TH0,A
+                                           ; SOURCE LINE # 263
+0048 D007              POP     AR7
+004A D006              POP     AR6
+004C D005              POP     AR5
+004E D004              POP     AR4
+0050 D003              POP     AR3
+0052 D002              POP     AR2
+0054 D001              POP     AR1
+0056 D000              POP     AR0
+0058 D0D0              POP     PSW
+005A D082              POP     DPL
+005C D083              POP     DPH
+005E D0F0              POP     B
+0060 D0E0              POP     ACC
+0062 32                RETI    
+             ; FUNCTION TIMER0_ISR (END)
+
+             ; FUNCTION ADC0EOC_ISR (BEGIN)
+0000 C0E0              PUSH    ACC
+0002 C0F0              PUSH    B
+0004 C083              PUSH    DPH
+0006 C082              PUSH    DPL
+0008 C0D0              PUSH    PSW
+000A 75D000            MOV     PSW,#00H
+000D C000              PUSH    AR0
+000F C001              PUSH    AR1
+0011 C002              PUSH    AR2
+0013 C003              PUSH    AR3
+0015 C004              PUSH    AR4
+0017 C005              PUSH    AR5
+0019 C006              PUSH    AR6
+001B C007              PUSH    AR7
+                                           ; SOURCE LINE # 267
+                                           ; SOURCE LINE # 270
+001D 7800        R     MOV     R0,#LOW adcMeasIndex
+001F E6                MOV     A,@R0
+0020 D3                SETB    C
+0021 9403              SUBB    A,#03H
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 20  
+
+0023 7480              MOV     A,#080H
+0025 9480              SUBB    A,#080H
+0027 500B              JNC     ?C0029
+                                           ; SOURCE LINE # 271
+0029 E6                MOV     A,@R0
+002A FD                MOV     R5,A
+002B AFBD              MOV     R7,ADC0
+002D AEBE              MOV     R6,ADC0+01H
+002F 120000      R     LCALL   __ADC_PushFilteredVal
+                                           ; SOURCE LINE # 272
+0032 800B              SJMP    ?C0030
+0034         ?C0029:
+                                           ; SOURCE LINE # 274
+0034 7800        R     MOV     R0,#LOW adcTempSensorIndex
+0036 E6                MOV     A,@R0
+0037 FD                MOV     R5,A
+0038 AFBD              MOV     R7,ADC0
+003A AEBE              MOV     R6,ADC0+01H
+003C 120000      R     LCALL   __ADC_PushTemp
+                                           ; SOURCE LINE # 275
+003F         ?C0030:
+                                           ; SOURCE LINE # 278
+003F 7800        R     MOV     R0,#LOW adcMeasIndex
+0041 E6                MOV     A,@R0
+0042 6404              XRL     A,#04H
+0044 6005              JZ      ?C0032
+0046 E6                MOV     A,@R0
+0047 6405              XRL     A,#05H
+0049 7007              JNZ     ?C0031
+004B         ?C0032:
+                                           ; SOURCE LINE # 280
+004B 7800        R     MOV     R0,#LOW adcStoredMeasIndex
+004D E6                MOV     A,@R0
+004E 08                INC     R0
+004F F6                MOV     @R0,A
+                                           ; SOURCE LINE # 281
+0050 8040              SJMP    ?C0033
+0052         ?C0031:
+                                           ; SOURCE LINE # 283
+0052 7800        R     MOV     R0,#LOW adcMeasIndex
+0054 06                INC     @R0
+0055 E6                MOV     A,@R0
+0056 D3                SETB    C
+0057 9403              SUBB    A,#03H
+0059 7480              MOV     A,#080H
+005B 9480              SUBB    A,#080H
+005D 4002              JC      ?C0034
+                                           ; SOURCE LINE # 284
+005F 7600              MOV     @R0,#00H
+                                           ; SOURCE LINE # 285
+0061         ?C0034:
+                                           ; SOURCE LINE # 286
+0061 7800        R     MOV     R0,#LOW adcTempMeasCount
+0063 08                INC     R0
+0064 E6                MOV     A,@R0
+0065 16                DEC     @R0
+0066 18                DEC     R0
+0067 7001              JNZ     ?C0079
+0069 16                DEC     @R0
+006A         ?C0079:
+006A 14                DEC     A
+006B 8606              MOV     AR6,@R0
+006D 4E                ORL     A,R6
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 21  
+
+006E 7022              JNZ     ?C0033
+                                           ; SOURCE LINE # 288
+0070 7800        R     MOV     R0,#LOW adcTempMeasCount
+0072 7607              MOV     @R0,#07H
+0074 08                INC     R0
+0075 76D0              MOV     @R0,#0D0H
+                                           ; SOURCE LINE # 289
+0077 7800        R     MOV     R0,#LOW adcMeasIndex
+0079 E6                MOV     A,@R0
+007A 18                DEC     R0
+007B F6                MOV     @R0,A
+                                           ; SOURCE LINE # 292
+007C 7800        R     MOV     R0,#LOW adcTempSensorIndex
+007E E6                MOV     A,@R0
+007F 6401              XRL     A,#01H
+0081 7800        R     MOV     R0,#LOW adcMeasIndex
+0083 7007              JNZ     ?C0036
+                                           ; SOURCE LINE # 293
+0085 7604              MOV     @R0,#04H
+                                           ; SOURCE LINE # 294
+0087 7800        R     MOV     R0,#LOW adcTempSensorIndex
+0089 F6                MOV     @R0,A
+                                           ; SOURCE LINE # 295
+008A 8006              SJMP    ?C0033
+008C         ?C0036:
+                                           ; SOURCE LINE # 296
+008C 7605              MOV     @R0,#05H
+                                           ; SOURCE LINE # 297
+008E 7800        R     MOV     R0,#LOW adcTempSensorIndex
+0090 7601              MOV     @R0,#01H
+                                           ; SOURCE LINE # 298
+                                           ; SOURCE LINE # 299
+                                           ; SOURCE LINE # 300
+0092         ?C0033:
+                                           ; SOURCE LINE # 303
+0092 7800        R     MOV     R0,#LOW adcMeasIndex
+0094 E6                MOV     A,@R0
+0095 14                DEC     A
+0096 6012              JZ      ?C0040
+0098 14                DEC     A
+0099 6014              JZ      ?C0041
+009B 14                DEC     A
+009C 6016              JZ      ?C0042
+009E 14                DEC     A
+009F 6018              JZ      ?C0043
+00A1 2404              ADD     A,#04H
+00A3 7019              JNZ     ?C0044
+                                           ; SOURCE LINE # 304
+00A5         ?C0039:
+                                           ; SOURCE LINE # 305
+00A5 759605            MOV     ADC0MX,#05H
+                                           ; SOURCE LINE # 306
+00A8 8017              SJMP    ?C0038
+                                           ; SOURCE LINE # 307
+00AA         ?C0040:
+                                           ; SOURCE LINE # 308
+00AA 759601            MOV     ADC0MX,#01H
+                                           ; SOURCE LINE # 309
+00AD 8012              SJMP    ?C0038
+                                           ; SOURCE LINE # 310
+00AF         ?C0041:
+                                           ; SOURCE LINE # 311
+00AF 759602            MOV     ADC0MX,#02H
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 22  
+
+                                           ; SOURCE LINE # 312
+00B2 800D              SJMP    ?C0038
+                                           ; SOURCE LINE # 313
+00B4         ?C0042:
+                                           ; SOURCE LINE # 314
+00B4 759603            MOV     ADC0MX,#03H
+                                           ; SOURCE LINE # 315
+00B7 8008              SJMP    ?C0038
+                                           ; SOURCE LINE # 316
+00B9         ?C0043:
+                                           ; SOURCE LINE # 317
+00B9 75961B            MOV     ADC0MX,#01BH
+                                           ; SOURCE LINE # 318
+00BC 8003              SJMP    ?C0038
+                                           ; SOURCE LINE # 319
+00BE         ?C0044:
+                                           ; SOURCE LINE # 320
+00BE 759604            MOV     ADC0MX,#04H
+                                           ; SOURCE LINE # 321
+00C1         ?C0038:
+                                           ; SOURCE LINE # 324
+00C1 C2ED              CLR     ADC0CN0_ADINT
+                                           ; SOURCE LINE # 325
+00C3 D007              POP     AR7
+00C5 D006              POP     AR6
+00C7 D005              POP     AR5
+00C9 D004              POP     AR4
+00CB D003              POP     AR3
+00CD D002              POP     AR2
+00CF D001              POP     AR1
+00D1 D000              POP     AR0
+00D3 D0D0              POP     PSW
+00D5 D082              POP     DPL
+00D7 D083              POP     DPH
+00D9 D0F0              POP     B
+00DB D0E0              POP     ACC
+00DD 32                RETI    
+             ; FUNCTION ADC0EOC_ISR (END)
+
+             ; FUNCTION __ADC_DelayMsec (BEGIN)
+                                           ; SOURCE LINE # 334
+0000 7800        R     MOV     R0,#LOW mSec
+0002 EF                MOV     A,R7
+0003 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 335
+                                           ; SOURCE LINE # 339
+0004 C28D              CLR     TCON_TF0
+                                           ; SOURCE LINE # 340
+0006 858C8A            MOV     TL0,TH0
+                                           ; SOURCE LINE # 341
+0009 D28C              SETB    TCON_TR0
+000B         ?C0046:
+                                           ; SOURCE LINE # 342
+000B 7800        R     MOV     R0,#LOW mSec
+000D E2                MOVX    A,@R0
+000E FF                MOV     R7,A
+000F 14                DEC     A
+0010 F2                MOVX    @R0,A
+0011 EF                MOV     A,R7
+0012 6019              JZ      ?C0047
+                                           ; SOURCE LINE # 343
+;---- Variable 'i' assigned to Register 'R7' ----
+0014 E4                CLR     A
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 23  
+
+0015 FF                MOV     R7,A
+0016         ?C0048:
+0016 EF                MOV     A,R7
+0017 C3                CLR     C
+0018 9404              SUBB    A,#04H
+001A 7480              MOV     A,#080H
+001C 9480              SUBB    A,#080H
+001E 5008              JNC     ?C0049
+0020         ?C0051:
+                                           ; SOURCE LINE # 345
+0020 308DFD            JNB     TCON_TF0,?C0051
+                                           ; SOURCE LINE # 348
+0023 C28D              CLR     TCON_TF0
+                                           ; SOURCE LINE # 349
+0025 0F                INC     R7
+0026 80EE              SJMP    ?C0048
+0028         ?C0049:
+                                           ; SOURCE LINE # 350
+0028 120000      E     LCALL   WD_Reset
+                                           ; SOURCE LINE # 351
+002B 80DE              SJMP    ?C0046
+002D         ?C0047:
+                                           ; SOURCE LINE # 354
+002D C28C              CLR     TCON_TR0
+                                           ; SOURCE LINE # 355
+002F C28D              CLR     TCON_TF0
+                                           ; SOURCE LINE # 356
+0031 22                RET     
+             ; FUNCTION __ADC_DelayMsec (END)
+
+             ; FUNCTION __ADC_GetSingleReading (BEGIN)
+                                           ; SOURCE LINE # 360
+;---- Variable 'adcChannel' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 361
+                                           ; SOURCE LINE # 363
+0000 8F96              MOV     ADC0MX,R7
+                                           ; SOURCE LINE # 366
+0002 7F0A              MOV     R7,#0AH
+0004 120000      R     LCALL   __ADC_DelayMsec
+                                           ; SOURCE LINE # 369
+0007 C2ED              CLR     ADC0CN0_ADINT
+                                           ; SOURCE LINE # 370
+0009 D2EC              SETB    ADC0CN0_ADBUSY
+000B         ?C0054:
+                                           ; SOURCE LINE # 373
+000B 30EDFD            JNB     ADC0CN0_ADINT,?C0054
+                                           ; SOURCE LINE # 374
+000E C2ED              CLR     ADC0CN0_ADINT
+                                           ; SOURCE LINE # 376
+0010 AFBD              MOV     R7,ADC0
+0012 AEBE              MOV     R6,ADC0+01H
+                                           ; SOURCE LINE # 377
+0014 22                RET     
+             ; FUNCTION __ADC_GetSingleReading (END)
+
+             ; FUNCTION __ADC_PushFilteredVal (BEGIN)
+                                           ; SOURCE LINE # 380
+0000 7800        R     MOV     R0,#LOW val
+0002 EE                MOV     A,R6
+0003 F2                MOVX    @R0,A
+0004 08                INC     R0
+0005 EF                MOV     A,R7
+0006 F2                MOVX    @R0,A
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 24  
+
+0007 08                INC     R0
+0008 ED                MOV     A,R5
+0009 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 381
+                                           ; SOURCE LINE # 383
+000A 30E030            JNB     ACC.0,?C0057
+                                           ; SOURCE LINE # 385
+000D E2                MOVX    A,@R0
+000E 120000      R     LCALL   L?0095
+0011 7806              MOV     R0,#06H
+0013 120000      E     LCALL   ?C?ULSHR
+0016 C004              PUSH    AR4
+0018 C005              PUSH    AR5
+001A C006              PUSH    AR6
+001C C007              PUSH    AR7
+001E 7800        R     MOV     R0,#LOW index
+0020 E2                MOVX    A,@R0
+0021 120000      R     LCALL   L?0095
+0024 D003              POP     AR3
+0026 D002              POP     AR2
+0028 D001              POP     AR1
+002A D000              POP     AR0
+002C 120000      R     LCALL   L?0110
+002F C004              PUSH    AR4
+0031 120000      R     LCALL   L?0103
+0034 D000              POP     AR0
+                                           ; SOURCE LINE # 388
+0036 120000      R     LCALL   L?0094
+0039 7806              MOV     R0,#06H
+                                           ; SOURCE LINE # 389
+003B 8030              SJMP    ?C0084
+003D         ?C0057:
+                                           ; SOURCE LINE # 391
+003D 7800        R     MOV     R0,#LOW index
+003F E2                MOVX    A,@R0
+0040 120000      R     LCALL   L?0095
+0043 7803              MOV     R0,#03H
+0045 120000      E     LCALL   ?C?ULSHR
+0048 C004              PUSH    AR4
+004A C005              PUSH    AR5
+004C C006              PUSH    AR6
+004E C007              PUSH    AR7
+0050 7800        R     MOV     R0,#LOW index
+0052 E2                MOVX    A,@R0
+0053 120000      R     LCALL   L?0095
+0056 D003              POP     AR3
+0058 D002              POP     AR2
+005A D001              POP     AR1
+005C D000              POP     AR0
+005E 120000      R     LCALL   L?0110
+0061 C004              PUSH    AR4
+0063 120000      R     LCALL   L?0103
+0066 D000              POP     AR0
+                                           ; SOURCE LINE # 394
+0068 120000      R     LCALL   L?0094
+006B 7803              MOV     R0,#03H
+006D         ?C0084:
+006D 120000      E     LCALL   ?C?ULSHR
+0070 EB                MOV     A,R3
+0071 25E0              ADD     A,ACC
+0073 2400        R     ADD     A,#LOW adcFilteredAdcVal
+0075 F8                MOV     R0,A
+0076 A606              MOV     @R0,AR6
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 25  
+
+0078 08                INC     R0
+0079 A607              MOV     @R0,AR7
+                                           ; SOURCE LINE # 395
+                                           ; SOURCE LINE # 396
+007B         ?C0059:
+007B 22                RET     
+             ; FUNCTION __ADC_PushFilteredVal (END)
+
+             ; FUNCTION __ADC_PushTemp (BEGIN)
+                                           ; SOURCE LINE # 399
+;---- Variable 'Tindex' assigned to Register 'R5' ----
+;---- Variable 'val' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 400
+                                           ; SOURCE LINE # 402
+0000 E4                CLR     A
+0001 7800        R     MOV     R0,#LOW tempAvgAdcVal
+0003 F2                MOVX    @R0,A
+0004 08                INC     R0
+0005 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 405
+0006 ED                MOV     A,R5
+0007 C4                SWAP    A
+0008 54F0              ANL     A,#0F0H
+000A 2400        R     ADD     A,#LOW adcTempAvgArray
+000C F8                MOV     R0,A
+000D C000              PUSH    AR0
+000F 7800        R     MOV     R0,#LOW adcTempAvgIndex
+0011 E6                MOV     A,@R0
+0012 D000              POP     AR0
+0014 25E0              ADD     A,ACC
+0016 28                ADD     A,R0
+0017 F8                MOV     R0,A
+0018 A606              MOV     @R0,AR6
+001A 08                INC     R0
+001B A607              MOV     @R0,AR7
+                                           ; SOURCE LINE # 406
+001D ED                MOV     A,R5
+001E 6401              XRL     A,#01H
+0020 7009              JNZ     ?C0060
+                                           ; SOURCE LINE # 408
+0022 7800        R     MOV     R0,#LOW adcTempAvgIndex
+0024 06                INC     @R0
+0025 E6                MOV     A,@R0
+0026 6408              XRL     A,#08H
+0028 7001              JNZ     ?C0060
+002A F6                MOV     @R0,A
+                                           ; SOURCE LINE # 409
+002B         ?C0060:
+                                           ; SOURCE LINE # 412
+002B E4                CLR     A
+002C 7800        R     MOV     R0,#LOW tempAvgAdcVal
+002E F2                MOVX    @R0,A
+002F 08                INC     R0
+0030 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 413
+;---- Variable 'i' assigned to Register 'R7' ----
+0031 FF                MOV     R7,A
+0032         ?C0062:
+0032 120000      R     LCALL   L?0109
+0035 501D              JNC     ?C0063
+                                           ; SOURCE LINE # 414
+0037 ED                MOV     A,R5
+0038 C4                SWAP    A
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 26  
+
+0039 54F0              ANL     A,#0F0H
+003B 2400        R     ADD     A,#LOW adcTempAvgArray
+003D F8                MOV     R0,A
+003E EF                MOV     A,R7
+003F 25E0              ADD     A,ACC
+0041 28                ADD     A,R0
+0042 F8                MOV     R0,A
+0043 E6                MOV     A,@R0
+0044 FA                MOV     R2,A
+0045 08                INC     R0
+0046 E6                MOV     A,@R0
+0047 FB                MOV     R3,A
+0048 7800        R     MOV     R0,#LOW tempAvgAdcVal+01H
+004A E2                MOVX    A,@R0
+004B 2B                ADD     A,R3
+004C F2                MOVX    @R0,A
+004D 18                DEC     R0
+004E E2                MOVX    A,@R0
+004F 3A                ADDC    A,R2
+0050 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 415
+0051 0F                INC     R7
+0052 80DE              SJMP    ?C0062
+0054         ?C0063:
+                                           ; SOURCE LINE # 418
+0054 7800        R     MOV     R0,#LOW tempAvgAdcVal+01H
+0056 E2                MOVX    A,@R0
+0057 30E209            JNB     ACC.2,?C0065
+                                           ; SOURCE LINE # 420
+005A E2                MOVX    A,@R0
+005B 2404              ADD     A,#04H
+005D F2                MOVX    @R0,A
+005E 18                DEC     R0
+005F E2                MOVX    A,@R0
+0060 3400              ADDC    A,#00H
+0062 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 421
+0063         ?C0065:
+                                           ; SOURCE LINE # 422
+0063 7800        R     MOV     R0,#LOW tempAvgAdcVal
+0065 E2                MOVX    A,@R0
+0066 FE                MOV     R6,A
+0067 08                INC     R0
+0068 E2                MOVX    A,@R0
+0069 7803              MOV     R0,#03H
+006B         ?C0080:
+006B CE                XCH     A,R6
+006C C3                CLR     C
+006D 13                RRC     A
+006E CE                XCH     A,R6
+006F 13                RRC     A
+0070 D8F9              DJNZ    R0,?C0080
+0072 7900        R     MOV     R1,#LOW tempAvgAdcVal+01H
+0074 F3                MOVX    @R1,A
+0075 EE                MOV     A,R6
+0076 19                DEC     R1
+0077 F3                MOVX    @R1,A
+                                           ; SOURCE LINE # 424
+0078 ED                MOV     A,R5
+0079 7800        R     MOV     R0,#LOW tempAvgAdcVal
+007B 7008              JNZ     ?C0066
+                                           ; SOURCE LINE # 425
+007D E2                MOVX    A,@R0
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 27  
+
+007E FE                MOV     R6,A
+007F 08                INC     R0
+0080 E2                MOVX    A,@R0
+0081 7800        R     MOV     R0,#LOW adcTempIntAvgAdcVal
+                                           ; SOURCE LINE # 426
+0083 8006              SJMP    ?C0085
+0085         ?C0066:
+                                           ; SOURCE LINE # 427
+0085 E2                MOVX    A,@R0
+0086 FE                MOV     R6,A
+0087 08                INC     R0
+0088 E2                MOVX    A,@R0
+0089 7800        R     MOV     R0,#LOW adcTempExtAvgAdcVal
+008B         ?C0085:
+008B A606              MOV     @R0,AR6
+008D 08                INC     R0
+008E F6                MOV     @R0,A
+                                           ; SOURCE LINE # 428
+                                           ; SOURCE LINE # 429
+008F         ?C0068:
+008F 22                RET     
+             ; FUNCTION __ADC_PushTemp (END)
+
+             ; FUNCTION __adc2mV (BEGIN)
+                                           ; SOURCE LINE # 435
+;---- Variable 'adcVal' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 436
+                                           ; SOURCE LINE # 437
+0000 120000      R     LCALL   L?0091
+0003 120000      R     LCALL   L?0111
+0006 7800        R     MOV     R0,#LOW t
+0008 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 438
+000B 7800        R     MOV     R0,#LOW t
+000D 120000      R     LCALL   L?0089
+0010 120000      R     LCALL   L?0104
+0013 7800        R     MOV     R0,#LOW t
+0015 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 439
+0018 7800        R     MOV     R0,#LOW t
+001A 08                INC     R0
+001B 120000      R     LCALL   L?0090
+                                           ; SOURCE LINE # 440
+001E 22                RET     
+             ; FUNCTION __adc2mV (END)
+
+             ; FUNCTION __adcIsr2mV (BEGIN)
+                                           ; SOURCE LINE # 446
+;---- Variable 'adcVal' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 447
+                                           ; SOURCE LINE # 448
+0000 120000      R     LCALL   L?0091
+0003 120000      R     LCALL   L?0111
+0006 7800        R     MOV     R0,#LOW t
+0008 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 449
+000B 7800        R     MOV     R0,#LOW t
+000D 120000      R     LCALL   L?0089
+0010 120000      R     LCALL   L?0104
+0013 7800        R     MOV     R0,#LOW t
+0015 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 450
+0018 7800        R     MOV     R0,#LOW t
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 28  
+
+001A 08                INC     R0
+001B 120000      R     LCALL   L?0090
+                                           ; SOURCE LINE # 451
+001E 22                RET     
+             ; FUNCTION __adcIsr2mV (END)
+
+             ; FUNCTION __adc2mA (BEGIN)
+                                           ; SOURCE LINE # 457
+;---- Variable 'adcVal' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 458
+                                           ; SOURCE LINE # 459
+0000 120000      R     LCALL   L?0092
+0003 120000      E     LCALL   ?C?LMUL
+0006 7800        R     MOV     R0,#LOW t
+0008 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 460
+000B 7800        R     MOV     R0,#LOW t
+000D 120000      R     LCALL   L?0089
+0010 7BFE              MOV     R3,#0FEH
+0012 7A07              MOV     R2,#07H
+0014 120000      R     LCALL   L?0105
+0017 7800        R     MOV     R0,#LOW t
+0019 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 461
+001C 7800        R     MOV     R0,#LOW t
+001E 08                INC     R0
+001F 120000      R     LCALL   L?0090
+                                           ; SOURCE LINE # 462
+0022 22                RET     
+             ; FUNCTION __adc2mA (END)
+
+             ; FUNCTION __adcIsr2mA (BEGIN)
+                                           ; SOURCE LINE # 468
+;---- Variable 'adcVal' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 469
+                                           ; SOURCE LINE # 470
+0000 120000      R     LCALL   L?0092
+0003 120000      E     LCALL   ?C?LMUL
+0006 7800        R     MOV     R0,#LOW t
+0008 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 471
+000B 7800        R     MOV     R0,#LOW t
+000D 120000      R     LCALL   L?0089
+0010 E4                CLR     A
+0011 7BFE              MOV     R3,#0FEH
+0013 7A07              MOV     R2,#07H
+0015 F9                MOV     R1,A
+0016 F8                MOV     R0,A
+0017 120000      E     LCALL   ?C?ULDIV
+001A 7800        R     MOV     R0,#LOW t
+001C 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 472
+001F 7800        R     MOV     R0,#LOW t
+0021 08                INC     R0
+0022 120000      R     LCALL   L?0090
+                                           ; SOURCE LINE # 473
+0025 22                RET     
+             ; FUNCTION __adcIsr2mA (END)
+
+             ; FUNCTION __adc2IntT10 (BEGIN)
+                                           ; SOURCE LINE # 483
+0000 7800        R     MOV     R0,#LOW adcVal
+                                           ; SOURCE LINE # 484
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 29  
+
+                                           ; SOURCE LINE # 492
+0002 120000      R     LCALL   L?0102
+0005 7F50              MOV     R7,#050H
+0007 7EB1              MOV     R6,#0B1H
+0009 7D3A              MOV     R5,#03AH
+000B 7C00              MOV     R4,#00H
+000D 120000      E     LCALL   ?C?SLDIV
+0010 7800        R     MOV     R0,#LOW t
+0012 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 493
+0015 7800        R     MOV     R0,#LOW adcVal
+0017 120000      R     LCALL   L?0098
+001A 120000      R     LCALL   L?0107
+                                           ; SOURCE LINE # 494
+001D 120000      R     LCALL   L?0088
+0020 C004              PUSH    AR4
+0022 C005              PUSH    AR5
+0024 C006              PUSH    AR6
+0026 C007              PUSH    AR7
+0028 AF8E              MOV     R7,TOFFH
+002A E4                CLR     A
+002B FC                MOV     R4,A
+002C FD                MOV     R5,A
+002D FE                MOV     R6,A
+002E 7804              MOV     R0,#04H
+0030 120000      E     LCALL   ?C?LSHL
+0033 C004              PUSH    AR4
+0035 C005              PUSH    AR5
+0037 C006              PUSH    AR6
+0039 C007              PUSH    AR7
+003B AF8D              MOV     R7,TOFFL
+003D E4                CLR     A
+003E FC                MOV     R4,A
+003F FD                MOV     R5,A
+0040 FE                MOV     R6,A
+0041 7804              MOV     R0,#04H
+0043 120000      E     LCALL   ?C?SLSHR
+0046 D003              POP     AR3
+0048 D002              POP     AR2
+004A D001              POP     AR1
+004C D000              POP     AR0
+004E EF                MOV     A,R7
+004F 4B                ORL     A,R3
+0050 FB                MOV     R3,A
+0051 EE                MOV     A,R6
+0052 4A                ORL     A,R2
+0053 FA                MOV     R2,A
+0054 ED                MOV     A,R5
+0055 49                ORL     A,R1
+0056 F9                MOV     R1,A
+0057 EC                MOV     A,R4
+0058 48                ORL     A,R0
+0059 F8                MOV     R0,A
+005A D007              POP     AR7
+005C D006              POP     AR6
+005E D005              POP     AR5
+0060 D004              POP     AR4
+0062 C3                CLR     C
+0063 EF                MOV     A,R7
+0064 9B                SUBB    A,R3
+0065 FF                MOV     R7,A
+0066 EE                MOV     A,R6
+0067 9A                SUBB    A,R2
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 30  
+
+0068 FE                MOV     R6,A
+0069 ED                MOV     A,R5
+006A 99                SUBB    A,R1
+006B FD                MOV     R5,A
+006C EC                MOV     A,R4
+006D 98                SUBB    A,R0
+006E FC                MOV     R4,A
+006F 7800        R     MOV     R0,#LOW t
+0071 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 498
+0074 900000      R     MOV     DPTR,#adcVRefMv
+0077 E4                CLR     A
+0078 120000      R     LCALL   L?0093
+007B 7800        R     MOV     R0,#LOW t
+007D 120000      R     LCALL   L?0099
+                                           ; SOURCE LINE # 499
+0080 120000      R     LCALL   L?0087
+0083 E4                CLR     A
+0084 7B64              MOV     R3,#064H
+0086 FA                MOV     R2,A
+0087 F9                MOV     R1,A
+                                           ; SOURCE LINE # 500
+0088 120000      R     LCALL   L?0087
+008B 7B78              MOV     R3,#078H
+008D 7A1F              MOV     R2,#01FH
+008F 7902              MOV     R1,#02H
+0091 7800              MOV     R0,#00H
+0093 120000      E     LCALL   ?C?SLDIV
+0096 7800        R     MOV     R0,#LOW t
+0098 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 502
+009B 7800        R     MOV     R0,#LOW t
+009D 08                INC     R0
+009E 120000      R     LCALL   L?0090
+                                           ; SOURCE LINE # 503
+00A1 22                RET     
+             ; FUNCTION __adc2IntT10 (END)
+
+             ; FUNCTION __adc2ExtT10 (BEGIN)
+                                           ; SOURCE LINE # 511
+0000 7800        R     MOV     R0,#LOW adcVal
+                                           ; SOURCE LINE # 512
+                                           ; SOURCE LINE # 516
+0002 120000      R     LCALL   L?0102
+0005 7F30              MOV     R7,#030H
+0007 7E38              MOV     R6,#038H
+0009 7D1F              MOV     R5,#01FH
+000B 7C00              MOV     R4,#00H
+000D 120000      E     LCALL   ?C?SLDIV
+0010 7800        R     MOV     R0,#LOW t
+0012 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 517
+0015 7800        R     MOV     R0,#LOW adcVal
+0017 120000      R     LCALL   L?0098
+001A 120000      R     LCALL   L?0107
+001D 7800        R     MOV     R0,#LOW t
+001F 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 521
+0022 900000      R     MOV     DPTR,#adcVRefMv
+0025 E4                CLR     A
+0026 120000      R     LCALL   L?0093
+0029 7800        R     MOV     R0,#LOW t
+002B 120000      R     LCALL   L?0099
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 31  
+
+002E F8                MOV     R0,A
+002F 120000      E     LCALL   ?C?LMUL
+0032 7800        R     MOV     R0,#LOW t
+0034 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 522
+0037 7800        R     MOV     R0,#LOW t
+0039 120000      R     LCALL   L?0089
+003C E4                CLR     A
+003D 7BFC              MOV     R3,#0FCH
+003F 7A0F              MOV     R2,#0FH
+0041 F9                MOV     R1,A
+0042 F8                MOV     R0,A
+0043 120000      E     LCALL   ?C?SLDIV
+0046 7800        R     MOV     R0,#LOW t
+0048 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 524
+004B 7800        R     MOV     R0,#LOW t
+004D 08                INC     R0
+004E 120000      R     LCALL   L?0090
+                                           ; SOURCE LINE # 525
+0051 22                RET     
+             ; FUNCTION __adc2ExtT10 (END)
+
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 32  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+SPI0CKR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A2H  1
+uint16_t . . . . . . . . . . . . . . .  TYPEDEF  -----  U_INT    -----  2
+__adc2mV . . . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  adcVal . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+  t. . . . . . . . . . . . . . . . . .  AUTO     PDATA  U_LONG   0000H  4
+P0 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0080H  1
+PSW_OV . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D2H  1
+XOSC0CN. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B1H  1
+P1 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0090H  1
+WD_Reset . . . . . . . . . . . . . . .  EXTERN   CODE   PROC     -----  -----
+P2 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A0H  1
+uint64_t . . . . . . . . . . . . . . .  TYPEDEF  -----  ARRAY    -----  8
+TIMER0_ISR . . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+ADC0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0097H  1
+SI_GEN_PTR_t . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  3
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  3
+  gptr . . . . . . . . . . . . . . . .  MEMBER   -----  STRUCT   0000H  3
+SMB0CN0_MASTER . . . . . . . . . . . .  ABSBIT   -----  BIT      00C7H  1
+PCA0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00F9H  2
+RTC0KEY. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AEH  1
+EIE1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E6H  1
+__ADC_PushFilteredVal. . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  val. . . . . . . . . . . . . . . . .  AUTO     PDATA  U_INT    0000H  2
+  index. . . . . . . . . . . . . . . .  AUTO     PDATA  U_CHAR   0002H  1
+__ADC_DelayMsec. . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  mSec . . . . . . . . . . . . . . . .  AUTO     PDATA  U_CHAR   0000H  1
+  i. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0007H  1
+SMB0CN0_ACK. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C1H  1
+EIE2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E7H  1
+int32_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  LONG     -----  4
+PSCTL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008FH  1
+IT01CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E4H  1
+CS0CN0 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B0H  1
+int16_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  INT      -----  2
+SMB0CN0_TXMODE . . . . . . . . . . . .  ABSBIT   -----  BIT      00C6H  1
+DERIVID. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E3H  1
+CS0MD1 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AFH  1
+SFRPAGE. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A7H  1
+CS0MD2 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F3H  1
+P0MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A4H  1
+CS0MD3 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F3H  1
+int64_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  ARRAY    -----  8
+P1MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A5H  1
+SI_UU32. . . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  4
+  u32. . . . . . . . . . . . . . . . .  MEMBER   -----  U_LONG   0000H  4
+  s32. . . . . . . . . . . . . . . . .  MEMBER   -----  LONG     0000H  4
+  uu16 . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+adcFilteredAdcVal. . . . . . . . . . .  PUBLIC   IDATA  ARRAY    0000H  8
+ADC0CN0_ADINT. . . . . . . . . . . . .  ABSBIT   -----  BIT      00EDH  1
+TMR2RLH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CBH  1
+P2MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A6H  1
+IE . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A8H  1
+false. . . . . . . . . . . . . . . . .  E_CONST  -----  U_CHAR   -----  1
+TMR3RLH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0093H  1
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 33  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+SI_UU16. . . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  2
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  U_INT    0000H  2
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  INT      0000H  2
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+EIP1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F6H  1
+EIP2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F7H  1
+SCON0_RB8. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009AH  1
+TMR2RLL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CAH  1
+PCA0CPH0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FCH  1
+TMR3RLL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0092H  1
+PCA0CPH1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EAH  1
+GPTR_t . . . . . . . . . . . . . . . .  TYPEDEF  -----  STRUCT   -----  3
+  memtype. . . . . . . . . . . . . . .  MEMBER   -----  U_CHAR   0000H  1
+  address. . . . . . . . . . . . . . .  MEMBER   -----  UNION    0001H  2
+SCON0_TB8. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009BH  1
+CS0CN0_CSEN. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B7H  1
+B_B0 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F0H  1
+DP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0082H  2
+PCA0CPH2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ECH  1
+B_B1 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F1H  1
+ADC0GT . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00C3H  2
+B_B2 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F2H  1
+PCA0CPL0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FBH  1
+B_B3 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F3H  1
+PCA0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D9H  1
+PCA0CPM0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DAH  1
+PCA0CPL1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E9H  1
+B_B4 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F4H  1
+PCA0CPM1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DBH  1
+PCA0CPL2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EBH  1
+B_B5 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F5H  1
+PCA0CPM2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DCH  1
+IP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B8H  1
+ADC0TK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BCH  1
+B_B6 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F6H  1
+ADC0LT . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00C5H  2
+IREF0CN0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D6H  1
+__adcIsr2mA. . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  adcVal . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+  t. . . . . . . . . . . . . . . . . .  AUTO     PDATA  U_LONG   0000H  4
+SCON0_MCE. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009DH  1
+B_B7 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F7H  1
+XBR0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E1H  1
+SMB0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C1H  1
+XBR1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E2H  1
+CS0SCAN0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D2H  1
+__adc2IntT10 . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  adcVal . . . . . . . . . . . . . . .  AUTO     PDATA  U_INT    0000H  2
+  t. . . . . . . . . . . . . . . . . .  AUTO     PDATA  LONG     0002H  4
+SMB0CN0_STA. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C5H  1
+XBR2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E3H  1
+CS0SCAN1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D3H  1
+ADC0MX . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0096H  1
+ACC_ACC0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E0H  1
+REF0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D1H  1
+HFO0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B2H  1
+CKCON0 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008EH  1
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 34  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+ADC0EOC_ISR. . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+ACC_ACC1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E1H  1
+REG0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C9H  1
+CRC0IN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0085H  1
+TMR2CN0_TR2. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CAH  1
+ACC_ACC2 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E2H  1
+ACC_ACC3 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E3H  1
+SP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0081H  1
+CMP0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009DH  1
+adcStoredMeasIndex . . . . . . . . . .  PUBLIC   IDATA  U_CHAR   0008H  1
+ACC_ACC4 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E4H  1
+__adc2ExtT10 . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  adcVal . . . . . . . . . . . . . . .  AUTO     PDATA  U_INT    0000H  2
+  t. . . . . . . . . . . . . . . . . .  AUTO     PDATA  LONG     0002H  4
+_ADC_GetValueForIsr. . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  index. . . . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0007H  1
+PCA0CN0_CCF0 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D8H  1
+ACC_ACC5 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E5H  1
+PCA0CN0_CCF1 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D9H  1
+ACC_ACC6 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E6H  1
+TMR2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00CCH  2
+PCA0CN0_CCF2 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DAH  1
+ACC_ACC7 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E7H  1
+TMR3 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0094H  2
+CS0CN0_CSCMPF. . . . . . . . . . . . .  ABSBIT   -----  BIT      00B0H  1
+SMB0CN0_ACKRQ. . . . . . . . . . . . .  ABSBIT   -----  BIT      00C3H  1
+VDM0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FFH  1
+P0MDIN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F1H  1
+SCON0_REN. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009CH  1
+P1MDIN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F2H  1
+CS0THH . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FEH  1
+SMB0CN0_STO. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C4H  1
+PMU0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B5H  1
+adcMeasIndex . . . . . . . . . . . . .  PUBLIC   IDATA  U_CHAR   0009H  1
+P0MASK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C7H  1
+bool . . . . . . . . . . . . . . . . .  TYPEDEF  DATA   BIT      -----  1
+P1MASK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BFH  1
+SI_GEN_PTR . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  3
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  3
+  gptr . . . . . . . . . . . . . . . .  MEMBER   -----  STRUCT   0000H  3
+__adcIsr2mV. . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  adcVal . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+  t. . . . . . . . . . . . . . . . . .  AUTO     PDATA  U_LONG   0000H  4
+CS0THL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FDH  1
+PSW_RS0. . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D3H  1
+PCA0CN0_CF . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DFH  1
+SPI0CN0_RXOVRN . . . . . . . . . . . .  ABSBIT   -----  BIT      00FCH  1
+PSW_RS1. . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D4H  1
+TMR2CN0_T2XCLK0. . . . . . . . . . . .  ABSBIT   -----  BIT      00C8H  1
+TMR2CN0_T2XCLK1. . . . . . . . . . . .  ABSBIT   -----  BIT      00C9H  1
+ADC0CN0_ADEN . . . . . . . . . . . . .  ABSBIT   -----  BIT      00EFH  1
+TMOD . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0089H  1
+TCON . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0088H  1
+PMU0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B5H  1
+PMU0FL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CEH  1
+CRC0FLIP . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009CH  1
+PSW_PARITY . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D0H  1
+IE_ES0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ACH  1
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 35  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+CMP0MX . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009FH  1
+IE_ET0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A9H  1
+IE_ET1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ABH  1
+P0SKIP . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D4H  1
+adcTimer0Reload. . . . . . . . . . . .  PUBLIC   IDATA  U_CHAR   000AH  1
+IE_ET2 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ADH  1
+P1SKIP . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D5H  1
+ADC0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E8H  1
+IE_EX0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A8H  1
+adcTempSensorIndex . . . . . . . . . .  PUBLIC   IDATA  U_CHAR   000BH  1
+PCA0CN0_CR . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DEH  1
+IE_EX1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AAH  1
+adcTempIntAvgAdcVal. . . . . . . . . .  PUBLIC   IDATA  U_INT    000CH  2
+ADC_Init . . . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  i. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0007H  1
+SCON0_SMODE. . . . . . . . . . . . . .  ABSBIT   -----  BIT      009FH  1
+CLKSEL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A9H  1
+SPI0CN0_SPIEN. . . . . . . . . . . . .  ABSBIT   -----  BIT      00F8H  1
+B. . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F0H  1
+ADC0H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BEH  1
+true . . . . . . . . . . . . . . . . .  E_CONST  -----  U_CHAR   -----  1
+__ADC_PushTemp . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  val. . . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+  Tindex . . . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0005H  1
+  i. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0007H  1
+  tempAvgAdcVal. . . . . . . . . . . .  AUTO     PDATA  U_INT    0000H  2
+CRC0AUTO . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009EH  1
+adcTempExtAvgAdcVal. . . . . . . . . .  PUBLIC   IDATA  U_INT    000EH  2
+CS0CN0_CSBUSY. . . . . . . . . . . . .  ABSBIT   -----  BIT      00B4H  1
+ADC0CN0_ADBMEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00EEH  1
+TMR2RL . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00CAH  2
+ADC0L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BDH  1
+TMR3RL . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0092H  2
+PCA0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D8H  1
+ACC. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E0H  1
+adcBuckEvalCount . . . . . . . . . . .  PUBLIC   IDATA  U_CHAR   0010H  1
+PCA0CP0. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00FBH  2
+PCA0CP1. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00E9H  2
+adcFilterSum . . . . . . . . . . . . .  PUBLIC   IDATA  ARRAY    0011H  16
+_ADC_GetValue. . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  index. . . . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0007H  1
+  t1 . . . . . . . . . . . . . . . . .  AUTO     PDATA  U_INT    0000H  2
+PCA0CP2. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00EBH  2
+CRC0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0084H  1
+TH0. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008CH  1
+IP_PS0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BCH  1
+TH1. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008DH  1
+PCA0H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FAH  1
+IP_PT0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B9H  1
+IP_PT1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BBH  1
+uint8_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  U_CHAR   -----  1
+__ADC_GetSingleReading . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  adcChannel . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0007H  1
+SMB0CN0_ARBLOST. . . . . . . . . . . .  ABSBIT   -----  BIT      00C2H  1
+IP_PT2 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BDH  1
+TL0. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008AH  1
+CS0CF. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AAH  1
+SPI0CN0_TXBMT. . . . . . . . . . . . .  ABSBIT   -----  BIT      00F9H  1
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 36  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+PSW_F0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D5H  1
+IE_ESPI0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AEH  1
+TL1. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008BH  1
+PCA0L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F9H  1
+SMB0CN0_SI . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C0H  1
+PSW_F1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D1H  1
+P0_B0. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0080H  1
+IP_PX0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B8H  1
+P1_B0. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0090H  1
+P0_B1. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0081H  1
+IP_PX1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BAH  1
+CS0DH. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EEH  1
+CMP0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009BH  1
+TCON_IE0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0089H  1
+P1_B1. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0091H  1
+P0_B2. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0082H  1
+TCON_IE1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008BH  1
+P1_B2. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0092H  1
+P0_B3. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0083H  1
+SMB0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C0H  1
+adcTimer0ReloadInc . . . . . . . . . .  PUBLIC   DATA   BIT      0000H  1
+P1_B3. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0093H  1
+P0_B4. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0084H  1
+P1_B4. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0094H  1
+P0_B5. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0085H  1
+CS0DL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EDH  1
+adcTempMeasCount . . . . . . . . . . .  PUBLIC   IDATA  U_INT    0021H  2
+P1_B5. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0095H  1
+P0_B6. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0086H  1
+P1_B6. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0096H  1
+P0_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0087H  1
+int8_t . . . . . . . . . . . . . . . .  TYPEDEF  -----  CHAR     -----  1
+P1_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0097H  1
+P2_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A7H  1
+DPH. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0083H  1
+ADC0GTH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C4H  1
+adcTempAvgIndex. . . . . . . . . . . .  PUBLIC   IDATA  U_CHAR   0023H  1
+TMR2CN0_TF2H . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CFH  1
+TMR2CN0_T2SPLIT. . . . . . . . . . . .  ABSBIT   -----  BIT      00CBH  1
+PSW_AC . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D6H  1
+SPI0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F8H  1
+HFO0CAL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B3H  1
+CS0SE. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DEH  1
+TCON_TF0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008DH  1
+SCON0_RI . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0098H  1
+DPL. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0082H  1
+TCON_TF1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008FH  1
+SBUF0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0099H  1
+PCON0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0087H  1
+IREF0CF. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B9H  1
+ADC0GTL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C3H  1
+SI_UU32_t. . . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  4
+  u32. . . . . . . . . . . . . . . . .  MEMBER   -----  U_LONG   0000H  4
+  s32. . . . . . . . . . . . . . . . .  MEMBER   -----  LONG     0000H  4
+  uu16 . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 37  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+TMR2CN0_TF2L . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CEH  1
+SCON0_TI . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0099H  1
+ADC0CN0_ADCM0. . . . . . . . . . . . .  ABSBIT   -----  BIT      00E8H  1
+ADC0LTH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C6H  1
+adcVRefMv. . . . . . . . . . . . . . .  PUBLIC   CODE   INT      1FFCH  2
+TCON_IT0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0088H  1
+CS0CN0_CSPME . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B1H  1
+ADC0CN0_ADCM1. . . . . . . . . . . . .  ABSBIT   -----  BIT      00E9H  1
+RSTSRC . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EFH  1
+P0MAT. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D7H  1
+CRC0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0086H  1
+SI_UU16_t. . . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  2
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  U_INT    0000H  2
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  INT      0000H  2
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+TCON_IT1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008AH  1
+ADC0CN0_ADCM2. . . . . . . . . . . . .  ABSBIT   -----  BIT      00EAH  1
+SCON0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0098H  1
+P1MAT. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CFH  1
+CS0PM. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DEH  1
+adcTempAvgArray. . . . . . . . . . . .  PUBLIC   IDATA  ARRAY    0024H  32
+ADC0CN0_ADWINT . . . . . . . . . . . .  ABSBIT   -----  BIT      00EBH  1
+ADC0CN0_ADBUSY . . . . . . . . . . . .  ABSBIT   -----  BIT      00ECH  1
+SMB0ADM. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F5H  1
+ADC0LTL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C5H  1
+SPI0CN0_MODF . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FDH  1
+IP_PSPI0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BEH  1
+CS0CN0_CSEOS . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B6H  1
+TMR2CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C8H  1
+TMR3CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0091H  1
+__adc2mA . . . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  adcVal . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+  t. . . . . . . . . . . . . . . . . .  AUTO     PDATA  U_LONG   0000H  4
+SMB0ADR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F4H  1
+TCON_TR0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008CH  1
+CS0CN0_CSINT . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B5H  1
+CS0MX. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ABH  1
+BUCK_Update. . . . . . . . . . . . . .  EXTERN   CODE   PROC     -----  -----
+TMR2CN0_TF2CEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00CCH  1
+TCON_TR1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008EH  1
+SMB0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C2H  1
+P0DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0099H  1
+CS0SS. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DDH  1
+AUX. . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0080H  1
+TMR2H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CDH  1
+SPI0CFG. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A1H  1
+P1DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009BH  1
+TMR3H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0095H  1
+P2DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009DH  1
+CRC0CNT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009AH  1
+TMR2L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CCH  1
+RTC0ADR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ACH  1
+SPI0CN0_SPIF . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FFH  1
+TMR3L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0094H  1
+ADC0PWR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BBH  1
+IE_EA. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AFH  1
+C51 COMPILER V9.60.0.0   ADC                                                               02/10/2023 14:24:29 PAGE 38  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+RTC0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ADH  1
+CS0CN0_CSCMPEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00B3H  1
+FLSCL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B6H  1
+TMR2CN0_TF2LEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00CDH  1
+SPI0CN0_WCOL . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FEH  1
+SPI0CN0_NSSMD0 . . . . . . . . . . . .  ABSBIT   -----  BIT      00FAH  1
+PSW_CY . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D7H  1
+SPI0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A3H  1
+SPI0CN0_NSSMD1 . . . . . . . . . . . .  ABSBIT   -----  BIT      00FBH  1
+ADC0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00BDH  2
+TOFFH. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008EH  1
+PSW. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D0H  1
+PCA0PWM. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DFH  1
+REVID. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E2H  1
+TOFFL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008DH  1
+FLKEY. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B7H  1
+uint32_t . . . . . . . . . . . . . . .  TYPEDEF  -----  U_LONG   -----  4
+ADC0AC . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BAH  1
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   1632    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----      36
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =     68    ----
+   BIT SIZE         =      1    ----
+   EDATA SIZE       =   ----    ----
+   HDATA SIZE       =   ----    ----
+   XDATA CONST SIZE =   ----    ----
+   FAR CONST SIZE   =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

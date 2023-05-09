@@ -1,0 +1,47 @@
+AX51 MACRO ASSEMBLER  ADC_REF_CONST                                                         02/10/23 13:46:28 PAGE     1
+
+
+MACRO ASSEMBLER AX51 V3.15.3.0
+OBJECT MODULE PLACED IN .\src\adc_ref_const.OBJ
+ASSEMBLER INVOKED BY: Z:\Applications\Simplicity Studio.app\Contents\Eclipse\developer\toolchains\keil_8051\9.60\BIN\AX5
+                      1.exe /Users/danjulio/SimplicityStudio/v4_workspace/SolarMpptCharger/src/adc_ref_const.A51 ERRORPR
+                      INT SET(COMPACT) DEBUG MACRO NOMOD51 INCDIR(/Users/danjulio/SimplicityStudio/v4_workspace/SolarMpp
+                      tCharger/inc;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/8051/v4.1.7//Devi
+                      ce/shared/si8051Base;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/8051/v4.1
+                      .7//Device/EFM8SB1/inc) PRINT(.\src\adc_ref_const.lst) COND SYMBOLS PAGEWIDTH(120) PAGELENGTH(65) 
+                      OBJECT(.\src\adc_ref_const.OBJ) 
+
+LOC    OBJ             LINE     SOURCE
+
+                          1     ; Code-space storage for ADC Reference voltage (mV)
+                          2     ;
+                          3     ; Designed to be accessed through the variable, adcVRefMv,
+                          4     ; defined in adc.c.  This allows a calibrated value to be loaded
+                          5     ; by a manufacturing test programmer.
+                          6     ;
+                          7     ; The default value is 1650 mV (specified internal reference voltage).
+                          8     ;   1650 = 672h
+                          9     ;
+                         10     ; The address is the last 2-bytes in code-space before the bootloader
+                         11     ; signature byte and lock byte
+                         12     ;
+001FFC                   13     CSEG AT 01FFCh
+001FFC 06                14     ADC_REF_VAL_HIGH: DB 06h
+001FFD 72                15     ADC_REF_VAL_LOW:  DB 72h
+                         16     END
+AX51 MACRO ASSEMBLER  ADC_REF_CONST                                                         02/10/23 13:46:28 PAGE     2
+
+SYMBOL TABLE LISTING
+------ ----- -------
+
+
+N A M E             T Y P E  V A L U E     ATTRIBUTES
+
+ADC_REF_VAL_HIGH .  C  ADDR  1FFCH     R   SEG=?CO?ADC_REF_CONST?1
+ADC_REF_VAL_LOW. .  C  ADDR  1FFDH     R   SEG=?CO?ADC_REF_CONST?1
+
+
+REGISTER BANK(S) USED: 0 
+
+
+ASSEMBLY COMPLETE.  0 WARNING(S), 0 ERROR(S).

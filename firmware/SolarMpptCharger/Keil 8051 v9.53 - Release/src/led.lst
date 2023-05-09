@@ -1,0 +1,1614 @@
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 1   
+
+
+C51 COMPILER V9.60.0.0, COMPILATION OF MODULE LED
+OBJECT MODULE PLACED IN .\src/led.OBJ
+COMPILER INVOKED BY: Z:\Applications\Simplicity Studio.app\Contents\Eclipse\developer\toolchains\keil_8051\9.60\BIN\C51.
+                    -exe /Users/danjulio/SimplicityStudio/v4_workspace/SolarMpptCharger/src/led.c OMF2 COMPACT DEBUG OBJECTEXTEND ROM(LARGE) 
+                    -WARNINGLEVEL(2) FLOATFUZZY(3) OPTIMIZE(9,SPEED) DEFINE(NDEBUG=1) INTVECTOR(0X0000) INTPROMOTE INCDIR(/Users/danjulio/Sim
+                    -plicityStudio/v4_workspace/SolarMpptCharger/inc;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/8051
+                    -/v4.1.7//Device/shared/si8051Base;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/8051/v4.1.7//Devic
+                    -e/EFM8SB1/inc) REGFILE(SolarMpptCharger.ORC) PRINT(.\src/led.lst) COND SYMBOLS CODE PAGEWIDTH(120) PAGELENGTH(65) OBJECT
+                    -(.\src/led.OBJ)
+
+line level    source
+
+   1          /*
+   2           * led.c
+   3           *
+   4           * Status LED Module.  Implements the following functionality:
+   5           *   - Power off: Short blink every 10 seconds
+   6           *   - Power on/Not charging: Short blink every 5 seconds
+   7           *   - Charging: PWM "breathing", max brightness based on charge current
+   8           *     PWM period ~ 24 kHz
+   9           *   - Fault indication (series of blinks every 5 seconds) (highest->lowest priority)
+  10           *     1. Bad Battery (2 blinks)
+  11           *     2. Missing External Temperature Sensor (3 blinks)
+  12           *     3. Operating Temperature range currently exceeded (4 blinks)
+  13           *
+  14           * Copyright (c) 2018-2023 danjuliodesigns, LLC.  All rights reserved.
+  15           *
+  16           * SolarMpptCharger is free software: you can redistribute it and/or modify it
+  17           * under the terms of the GNU Lesser General Public License as published
+  18           * by the Free Software Foundation, either version 3 of the License, or
+  19           * (at your option) any later version.
+  20           *
+  21           * SolarMpptCharger is distributed in the hope that it will be useful,
+  22           * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  23           * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  24           * GNU Lesser General Public License for more details.
+  25           *
+  26           * See <http://www.gnu.org/licenses/>.
+  27           *
+  28           */
+  29          #include "led.h"
+  30          #include "charge.h"
+  31          #include "config.h"
+  32          #include "power.h"
+  33          #include "temp.h"
+  34          
+  35          
+  36          //-----------------------------------------------------------------------------
+  37          // Variables
+  38          //-----------------------------------------------------------------------------
+  39          uint8_t LED_blinkState;
+  40          uint8_t LED_curState;
+  41          uint8_t LED_curFault;
+  42          uint8_t LED_curPwm;
+  43          uint8_t LED_totBlinkCount;
+  44          uint8_t LED_curBlinkCount;
+  45          uint8_t LED_pulseMax;
+  46          uint16_t LED_curPeriod;
+  47          uint16_t LED_maxPeriod;
+  48          uint16_t LED_pulseValue;     // Fractional pulsed LED value - upper 8 bits is used as PWM value
+  49          uint16_t LED_pulseInc;       // Fractional increment/decrement value per step {IIIIIIII.FFFFFFFF}
+  50          
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 2   
+
+  51          
+  52          
+  53          //-----------------------------------------------------------------------------
+  54          // Internal Routine forward declarations
+  55          //-----------------------------------------------------------------------------
+  56          void _LED_SetNormalState(uint8_t s);
+  57          uint8_t _LED_ReturnCurNormalState();
+  58          void _LED_SetupFault(uint8_t f);
+  59          uint8_t _LED_ReturnFaultInfo();
+  60          void _LED_SetCurPwm2Led();
+  61          void _LED_SetConstIntensity(uint8_t intensity);
+  62          void _LED_SetupBlink(uint16_t blinkPeriod, uint8_t blinkCount);
+  63          void _LED_SetupPulse();
+  64          void _LED_DoBlink();
+  65          void _LED_DoPulse();
+  66          
+  67          
+  68          
+  69          //-----------------------------------------------------------------------------
+  70          // API Routines
+  71          //-----------------------------------------------------------------------------
+  72          void LED_Init()
+  73          {
+  74   1              uint8_t t;
+  75   1      
+  76   1              LED_curState = LED_ST_INIT;
+  77   1              LED_curFault = LED_FAULT_NONE;
+  78   1              _LED_SetConstIntensity(0);
+  79   1      
+  80   1              // Look for an initial fault condition
+  81   1              t = _LED_ReturnFaultInfo();
+  82   1              if (t != LED_FAULT_NONE) {
+  83   2                      _LED_SetupFault(t);
+  84   2              } else {
+  85   2                      // Get normal state
+  86   2                      t = _LED_ReturnCurNormalState();
+  87   2                      _LED_SetNormalState(t);
+  88   2              }
+  89   1      
+  90   1      }
+  91          
+  92          
+  93          // Designed to be called every LED_EVAL_MSEC mSec
+  94          //   Requires 6-36 uSec, up to ~232 uSec when (re)computing pulse parameters
+  95          void LED_Update()
+  96          {
+  97   1              uint8_t t;
+  98   1      
+  99   1              // Fault condition has highest priority
+ 100   1              t = _LED_ReturnFaultInfo();
+ 101   1              if (LED_curState == LED_ST_FAULT) {
+ 102   2                      // Remain in fault state until there are no faults
+ 103   2                      if (t == LED_FAULT_NONE) {
+ 104   3                              t = _LED_ReturnCurNormalState();
+ 105   3                              _LED_SetNormalState(t);
+ 106   3                      } else {
+ 107   3                              if (t < LED_curFault) {
+ 108   4                                      // Higher priority fault
+ 109   4                                      _LED_SetupFault(t);
+ 110   4                              } else {
+ 111   4                                      // Continue blinking this fault code
+ 112   4                                      _LED_DoBlink();
+ 113   4                              }
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 3   
+
+ 114   3                      }
+ 115   2              } else {
+ 116   2                      if (t != LED_FAULT_NONE) {
+ 117   3                              // Enter fault state
+ 118   3                              _LED_SetupFault(t);
+ 119   3                      } else {
+ 120   3                              // Look for a change of normal state
+ 121   3                              t = _LED_ReturnCurNormalState();
+ 122   3                              if (LED_curState != t) {
+ 123   4                                      _LED_SetNormalState(t);
+ 124   4                              } else {
+ 125   4                                      // Just update the LED
+ 126   4                                      if (LED_curState == LED_ST_CHARGE) {
+ 127   5                                              _LED_DoPulse();
+ 128   5                                      } else {
+ 129   5                                              _LED_DoBlink();
+ 130   5                                      }
+ 131   4                              }
+ 132   3                      }
+ 133   2              }
+ 134   1      }
+ 135          
+ 136          
+ 137          
+ 138          //-----------------------------------------------------------------------------
+ 139          // Internal Routines
+ 140          //-----------------------------------------------------------------------------
+ 141          void _LED_SetNormalState(uint8_t s)
+ 142          {
+ 143   1              LED_curFault = LED_FAULT_NONE;
+ 144   1      
+ 145   1              if (s != LED_curState) {
+ 146   2                      LED_curState = s;
+ 147   2      
+ 148   2                      switch(s) {
+ 149   3                      case LED_ST_IDLE_CHG:
+ 150   3                              // Setup blink
+ 151   3                              _LED_SetupBlink(LED_IDLE_PER_MSEC, 1);
+ 152   3                              break;
+ 153   3                      case LED_ST_LOW_BATT:
+ 154   3                              // Setup blink
+ 155   3                              _LED_SetupBlink(LED_PO_PER_MSEC, 1);
+ 156   3                              break;
+ 157   3                      case LED_ST_CHARGE:
+ 158   3                              // Setup pulse
+ 159   3                              _LED_SetupPulse();
+ 160   3                              break;
+ 161   3                      }
+ 162   2      
+ 163   2                      // Update LED
+ 164   2                      _LED_SetCurPwm2Led();
+ 165   2              }
+ 166   1      }
+ 167          
+ 168          
+ 169          uint8_t _LED_ReturnCurNormalState()
+ 170          {
+ 171   1              // Priority detection of normal operating states
+ 172   1              if (CHARGE_GetState() > CHG_ST_IDLE) {
+ 173   2                      return LED_ST_CHARGE;
+ 174   2              } else if (POWER_LowBattDisabled()) {
+ 175   2                      return LED_ST_LOW_BATT;
+ 176   2              } else {
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 4   
+
+ 177   2                      return LED_ST_IDLE_CHG;
+ 178   2              }
+ 179   1      }
+ 180          
+ 181          
+ 182          void _LED_SetupFault(uint8_t f)
+ 183          {
+ 184   1              uint8_t t;
+ 185   1      
+ 186   1              LED_curState = LED_ST_FAULT;
+ 187   1      
+ 188   1              if (f != LED_curFault) {
+ 189   2                      // Setup blink
+ 190   2                      LED_curFault = f;
+ 191   2      
+ 192   2                      switch(f) {
+ 193   3                      case LED_FAULT_BAD_BATT:
+ 194   3                              t = LED_BAD_BATT_BLNKS;
+ 195   3                              break;
+ 196   3                      case LED_FAULT_MISS_ET:
+ 197   3                              t = LED_MISS_ET_BLNKS;
+ 198   3                              break;
+ 199   3                      case LED_FAULT_TEMP_RNG:
+ 200   3                              t = LED_TEMP_RNG_BLNKS;
+ 201   3                              break;
+ 202   3                      default:
+ 203   3                              t = LED_UNKNOWN_BLNKS;
+ 204   3                      }
+ 205   2                      _LED_SetupBlink(LED_FAULT_PER_MSEC, t);
+ 206   2      
+ 207   2                      // Update LED
+ 208   2                      _LED_SetCurPwm2Led();
+ 209   2              }
+ 210   1      }
+ 211          
+ 212          
+ 213          uint8_t _LED_ReturnFaultInfo()
+ 214          {
+ 215   1              // Check for fault conditions in priority order
+ 216   1              if (POWER_badBattery()) {
+ 217   2                      return LED_FAULT_BAD_BATT;
+ 218   2              } else if (TEMP_ExtSensorMissing()) {
+ 219   2                      return LED_FAULT_MISS_ET;
+ 220   2              } else if (CHARGE_IsTempLimited()) {
+ 221   2                      return LED_FAULT_TEMP_RNG;
+ 222   2              } else {
+ 223   2                      return LED_FAULT_NONE;
+ 224   2              }
+ 225   1      }
+ 226          
+ 227          
+ 228          void _LED_SetCurPwm2Led()
+ 229          {
+ 230   1              uint16_t pwmVal;
+ 231   1      
+ 232   1              // Convert 8-bit LED_curPwm to 10-bit PWM count
+ 233   1              pwmVal = 1023 - (LED_curPwm << 2);
+ 234   1      
+ 235   1              // Load the PWM value
+ 236   1              PCA0CPL1 = pwmVal & 0xFF;
+ 237   1              PCA0CPH1 = pwmVal >> 8;
+ 238   1      
+ 239   1              // ECOM0 must be cleared if value is 0 to completely disable PWM
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 5   
+
+ 240   1              if (LED_curPwm == 0) {
+ 241   2                      PCA0CPM1 &= ~0x40;         // Clear ECOM0 to disable output
+ 242   2              } else {
+ 243   2                      if ((PCA0CPM1 & 0x40) == 0x00) {
+ 244   3                              PCA0CPM1 |= 0x40;          // Set ECOM0 when output is not 0
+ 245   3                      }
+ 246   2              }
+ 247   1      }
+ 248          
+ 249          
+ 250          void _LED_SetConstIntensity(uint8_t intensity)
+ 251          {
+ 252   1              LED_curPwm = intensity;
+ 253   1              _LED_SetCurPwm2Led();
+ 254   1      }
+ 255          
+ 256          
+ 257          void _LED_SetupBlink(uint16_t blinkPeriod, uint8_t blinkCount)
+ 258          {
+ 259   1              LED_curPwm = 0;
+ 260   1              LED_totBlinkCount = blinkCount;
+ 261   1              LED_curBlinkCount = 0;
+ 262   1              LED_maxPeriod = blinkPeriod/LED_EVAL_MSEC;
+ 263   1              LED_curPeriod = 0;
+ 264   1              LED_blinkState = LED_BLINK_OFF_ST;
+ 265   1      }
+ 266          
+ 267          
+ 268          void _LED_SetupPulse()
+ 269          {
+ 270   1              uint32_t t;
+ 271   1      
+ 272   1              // Scale solar current between 0 and I_SOLAR_MAX to LED_MIN_PWM to 255
+ 273   1              t = (255 - LED_MIN_PWM) * (uint32_t) CHARGE_GetIsMa();
+ 274   1              t = t / I_SOLAR_MAX;
+ 275   1              t = t + LED_MIN_PWM;
+ 276   1      
+ 277   1          // Maximum pulse brightness
+ 278   1              if (t > 255) {
+ 279   2                      LED_pulseMax = 255;
+ 280   2              } else {
+ 281   2                      LED_pulseMax = t & 0xFF;
+ 282   2              }
+ 283   1      
+ 284   1              // Compute fractional increment value based on number of steps
+ 285   1              LED_pulseInc = (uint16_t) (LED_pulseMax << 8) / LED_NUM_STEPS;
+ 286   1      
+ 287   1              // Start with LED off
+ 288   1              LED_curPwm = 0;
+ 289   1              LED_pulseValue = 0;
+ 290   1              LED_blinkState = LED_PWM_UP_ST;
+ 291   1      }
+ 292          
+ 293          
+ 294          void _LED_DoBlink()
+ 295          {
+ 296   1              switch (LED_blinkState) {
+ 297   2              case LED_BLINK_OFF_ST:
+ 298   2                      if (++LED_curPeriod == (LED_BLINK_OFF_MSEC/LED_EVAL_MSEC)) {
+ 299   3                              // Change to ON part of blink
+ 300   3                              LED_curPeriod = 0;
+ 301   3                              LED_blinkState = LED_BLINK_ON_ST;
+ 302   3                              _LED_SetConstIntensity(LED_BLINK_PWM);
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 6   
+
+ 303   3                      }
+ 304   2                      break;
+ 305   2      
+ 306   2              case LED_BLINK_ON_ST:
+ 307   2                      if (++LED_curPeriod == (LED_BLINK_ON_MSEC/LED_EVAL_MSEC)) {
+ 308   3                              LED_curPeriod = 0;
+ 309   3                              _LED_SetConstIntensity(0);
+ 310   3      
+ 311   3                              // See if we have more blinks or are in the period between sets of blinks
+ 312   3                              if (++LED_curBlinkCount == LED_totBlinkCount) {
+ 313   4                                      LED_blinkState = LED_BLINK_WAIT_ST;
+ 314   4                              } else {
+ 315   4                                      LED_blinkState = LED_BLINK_OFF_ST;
+ 316   4                              }
+ 317   3                      }
+ 318   2                      break;
+ 319   2      
+ 320   2              case LED_BLINK_WAIT_ST:
+ 321   2                      if (++LED_curPeriod == LED_maxPeriod) {
+ 322   3                              // Done with the wait period between sets of blinks, start a blink
+ 323   3                              LED_curPeriod = 0;
+ 324   3                              LED_blinkState = LED_BLINK_OFF_ST;
+ 325   3                              LED_curBlinkCount = 0;
+ 326   3                      }
+ 327   2                      break;
+ 328   2      
+ 329   2              default:
+ 330   2                      // Should never get here so setup something sane(ish)
+ 331   2                      LED_blinkState = LED_BLINK_OFF_ST;
+ 332   2                      LED_curPeriod = 0;
+ 333   2                      LED_curBlinkCount = 0;
+ 334   2                      _LED_SetConstIntensity(0);
+ 335   2              }
+ 336   1      }
+ 337          
+ 338          
+ 339          void _LED_DoPulse()
+ 340          {
+ 341   1              switch (LED_blinkState) {
+ 342   2              case LED_PWM_UP_ST:
+ 343   2                      LED_pulseValue += LED_pulseInc;
+ 344   2                      LED_curPwm = LED_pulseValue >> 8;
+ 345   2                      if (LED_curPwm >= LED_pulseMax) {
+ 346   3                              LED_curPwm = LED_pulseMax;
+ 347   3                              LED_blinkState = LED_PWM_DN_ST;
+ 348   3                      }
+ 349   2                      break;
+ 350   2      
+ 351   2              case LED_PWM_DN_ST:
+ 352   2                      LED_pulseValue -= LED_pulseInc;
+ 353   2                      LED_curPwm = LED_pulseValue >> 8;
+ 354   2                      if (LED_pulseValue == 0) {
+ 355   3                              LED_blinkState = LED_PWM_UP_ST;
+ 356   3      
+ 357   3                              // Update power level once per pulse
+ 358   3                              _LED_SetupPulse();
+ 359   3                      }
+ 360   2                      break;
+ 361   2      
+ 362   2              default:
+ 363   2                      _LED_SetupPulse();
+ 364   2              }
+ 365   1      
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 7   
+
+ 366   1              _LED_SetCurPwm2Led();
+ 367   1      }
+ 368          
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 8   
+
+ASSEMBLY LISTING OF GENERATED OBJECT CODE
+
+
+             ; FUNCTION Com004D (BEGIN)
+0000         L?0078:
+0000         L?0079:
+0000 7800        R     MOV     R0,#LOW LED_curPeriod
+0002 08                INC     R0
+0003 E2                MOVX    A,@R0
+0004 2401              ADD     A,#01H
+0006 FF                MOV     R7,A
+0007 F2                MOVX    @R0,A
+0008 18                DEC     R0
+0009 E2                MOVX    A,@R0
+000A 3400              ADDC    A,#00H
+000C FE                MOV     R6,A
+000D F2                MOVX    @R0,A
+000E 22                RET     
+000F         L?0080:
+000F 7800        R     MOV     R0,#LOW t
+0011 120000      E     LCALL   ?C?LSTPDATA
+0014         L?0081:
+0014 7800        R     MOV     R0,#LOW t
+0016 E2                MOVX    A,@R0
+0017 FC                MOV     R4,A
+0018 08                INC     R0
+0019 E2                MOVX    A,@R0
+001A FD                MOV     R5,A
+001B 08                INC     R0
+001C 22                RET     
+             ; FUNCTION Com004D (END)
+
+             ; FUNCTION LED_Init (BEGIN)
+                                           ; SOURCE LINE # 72
+                                           ; SOURCE LINE # 73
+                                           ; SOURCE LINE # 76
+0000 E4                CLR     A
+0001 7800        R     MOV     R0,#LOW LED_curState
+0003 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 77
+0004 7800        R     MOV     R0,#LOW LED_curFault
+0006 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 78
+0007 FF                MOV     R7,A
+0008 120000      R     LCALL   __LED_SetConstIntensity
+                                           ; SOURCE LINE # 81
+000B 120000      R     LCALL   _LED_ReturnFaultInfo
+000E 7800        R     MOV     R0,#LOW t
+0010 EF                MOV     A,R7
+0011 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 82
+0012 6005              JZ      ?C0001
+                                           ; SOURCE LINE # 83
+0014 E2                MOVX    A,@R0
+0015 FF                MOV     R7,A
+0016 020000      R     LJMP    __LED_SetupFault
+                                           ; SOURCE LINE # 84
+0019         ?C0001:
+                                           ; SOURCE LINE # 86
+0019 120000      R     LCALL   _LED_ReturnCurNormalState
+001C 7800        R     MOV     R0,#LOW t
+001E EF                MOV     A,R7
+001F F2                MOVX    @R0,A
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 9   
+
+                                           ; SOURCE LINE # 87
+0020 120000      R     LCALL   __LED_SetNormalState
+                                           ; SOURCE LINE # 88
+                                           ; SOURCE LINE # 90
+0023         ?C0003:
+0023 22                RET     
+             ; FUNCTION LED_Init (END)
+
+             ; FUNCTION LED_Update (BEGIN)
+                                           ; SOURCE LINE # 95
+                                           ; SOURCE LINE # 96
+                                           ; SOURCE LINE # 100
+0000 120000      R     LCALL   _LED_ReturnFaultInfo
+0003 7800        R     MOV     R0,#LOW t
+0005 EF                MOV     A,R7
+0006 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 101
+0007 7800        R     MOV     R0,#LOW LED_curState
+0009 E2                MOVX    A,@R0
+000A 6404              XRL     A,#04H
+000C 701C              JNZ     ?C0004
+                                           ; SOURCE LINE # 103
+000E 7800        R     MOV     R0,#LOW t
+0010 E2                MOVX    A,@R0
+0011 7009              JNZ     ?C0005
+                                           ; SOURCE LINE # 104
+0013 120000      R     LCALL   _LED_ReturnCurNormalState
+0016 7800        R     MOV     R0,#LOW t
+0018 EF                MOV     A,R7
+0019 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 105
+                                           ; SOURCE LINE # 106
+001A 8028              SJMP    ?C0071
+001C         ?C0005:
+                                           ; SOURCE LINE # 107
+001C 7800        R     MOV     R0,#LOW LED_curFault
+001E E2                MOVX    A,@R0
+001F FE                MOV     R6,A
+0020 7800        R     MOV     R0,#LOW t
+0022 E2                MOVX    A,@R0
+0023 FF                MOV     R7,A
+0024 C3                CLR     C
+0025 9E                SUBB    A,R6
+0026 5029              JNC     ?C0073
+                                           ; SOURCE LINE # 109
+                                           ; SOURCE LINE # 110
+0028 8006              SJMP    ?C0072
+002A         ?C0004:
+                                           ; SOURCE LINE # 116
+002A 7800        R     MOV     R0,#LOW t
+002C E2                MOVX    A,@R0
+002D FF                MOV     R7,A
+002E 6003              JZ      ?C0010
+                                           ; SOURCE LINE # 118
+0030         ?C0072:
+0030 020000      R     LJMP    __LED_SetupFault
+                                           ; SOURCE LINE # 119
+0033         ?C0010:
+                                           ; SOURCE LINE # 121
+0033 120000      R     LCALL   _LED_ReturnCurNormalState
+0036 7800        R     MOV     R0,#LOW t
+0038 EF                MOV     A,R7
+0039 F2                MOVX    @R0,A
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 10  
+
+                                           ; SOURCE LINE # 122
+003A 7800        R     MOV     R0,#LOW LED_curState
+003C E2                MOVX    A,@R0
+003D 6F                XRL     A,R7
+003E 6007              JZ      ?C0012
+                                           ; SOURCE LINE # 123
+0040 7800        R     MOV     R0,#LOW t
+0042 E2                MOVX    A,@R0
+0043 FF                MOV     R7,A
+0044         ?C0071:
+0044 020000      R     LJMP    __LED_SetNormalState
+                                           ; SOURCE LINE # 124
+0047         ?C0012:
+                                           ; SOURCE LINE # 126
+0047 7800        R     MOV     R0,#LOW LED_curState
+0049 E2                MOVX    A,@R0
+004A 6403              XRL     A,#03H
+004C 7003              JNZ     ?C0014
+                                           ; SOURCE LINE # 127
+004E 020000      R     LJMP    _LED_DoPulse
+                                           ; SOURCE LINE # 128
+0051         ?C0014:
+                                           ; SOURCE LINE # 129
+0051         ?C0073:
+0051 120000      R     LCALL   _LED_DoBlink
+                                           ; SOURCE LINE # 130
+                                           ; SOURCE LINE # 131
+                                           ; SOURCE LINE # 132
+                                           ; SOURCE LINE # 133
+                                           ; SOURCE LINE # 134
+0054         ?C0016:
+0054 22                RET     
+             ; FUNCTION LED_Update (END)
+
+             ; FUNCTION __LED_SetNormalState (BEGIN)
+                                           ; SOURCE LINE # 141
+;---- Variable 's' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 142
+                                           ; SOURCE LINE # 143
+0000 E4                CLR     A
+0001 7800        R     MOV     R0,#LOW LED_curFault
+0003 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 145
+0004 7800        R     MOV     R0,#LOW LED_curState
+0006 E2                MOVX    A,@R0
+0007 6F                XRL     A,R7
+0008 6026              JZ      ?C0022
+                                           ; SOURCE LINE # 146
+000A EF                MOV     A,R7
+000B F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 148
+000C 24FE              ADD     A,#0FEH
+000E 600F              JZ      ?C0020
+0010 14                DEC     A
+0011 6017              JZ      ?C0021
+0013 2402              ADD     A,#02H
+0015 7016              JNZ     ?C0018
+                                           ; SOURCE LINE # 149
+0017         ?C0019:
+                                           ; SOURCE LINE # 151
+0017 7D01              MOV     R5,#01H
+0019 7F88              MOV     R7,#088H
+001B 7E13              MOV     R6,#013H
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 11  
+
+                                           ; SOURCE LINE # 152
+001D 8006              SJMP    ?C0074
+                                           ; SOURCE LINE # 153
+001F         ?C0020:
+                                           ; SOURCE LINE # 155
+001F 7D01              MOV     R5,#01H
+0021 7F10              MOV     R7,#010H
+0023 7E27              MOV     R6,#027H
+0025         ?C0074:
+0025 120000      R     LCALL   __LED_SetupBlink
+                                           ; SOURCE LINE # 156
+0028 8003              SJMP    ?C0018
+                                           ; SOURCE LINE # 157
+002A         ?C0021:
+                                           ; SOURCE LINE # 159
+002A 120000      R     LCALL   _LED_SetupPulse
+                                           ; SOURCE LINE # 160
+                                           ; SOURCE LINE # 161
+002D         ?C0018:
+                                           ; SOURCE LINE # 164
+002D 120000      R     LCALL   _LED_SetCurPwm2Led
+                                           ; SOURCE LINE # 165
+                                           ; SOURCE LINE # 166
+0030         ?C0022:
+0030 22                RET     
+             ; FUNCTION __LED_SetNormalState (END)
+
+             ; FUNCTION _LED_ReturnCurNormalState (BEGIN)
+                                           ; SOURCE LINE # 169
+                                           ; SOURCE LINE # 170
+                                           ; SOURCE LINE # 172
+0000 7800        E     MOV     R0,#LOW chargeState
+0002 E2                MOVX    A,@R0
+0003 D3                SETB    C
+0004 9401              SUBB    A,#01H
+0006 7480              MOV     A,#080H
+0008 9480              SUBB    A,#080H
+000A 4003              JC      ?C0023
+                                           ; SOURCE LINE # 173
+000C 7F03              MOV     R7,#03H
+000E 22                RET     
+                                           ; SOURCE LINE # 174
+000F         ?C0023:
+000F 7800        E     MOV     R0,#LOW POWER_state
+0011 E2                MOVX    A,@R0
+0012 7F01              MOV     R7,#01H
+0014 7002              JNZ     ?C0026
+                                           ; SOURCE LINE # 175
+0016 7F02              MOV     R7,#02H
+                                           ; SOURCE LINE # 176
+0018         ?C0026:
+                                           ; SOURCE LINE # 177
+                                           ; SOURCE LINE # 178
+                                           ; SOURCE LINE # 179
+0018         ?C0024:
+0018 22                RET     
+             ; FUNCTION _LED_ReturnCurNormalState (END)
+
+             ; FUNCTION __LED_SetupFault (BEGIN)
+                                           ; SOURCE LINE # 182
+;---- Variable 'f' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 183
+                                           ; SOURCE LINE # 186
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 12  
+
+0000 7800        R     MOV     R0,#LOW LED_curState
+0002 7404              MOV     A,#04H
+0004 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 188
+0005 7800        R     MOV     R0,#LOW LED_curFault
+0007 E2                MOVX    A,@R0
+0008 6F                XRL     A,R7
+0009 6035              JZ      ?C0034
+                                           ; SOURCE LINE # 190
+000B EF                MOV     A,R7
+000C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 192
+000D 24FE              ADD     A,#0FEH
+000F 600E              JZ      ?C0031
+0011 14                DEC     A
+0012 6012              JZ      ?C0032
+0014 2402              ADD     A,#02H
+0016 7015              JNZ     ?C0033
+                                           ; SOURCE LINE # 193
+0018         ?C0030:
+                                           ; SOURCE LINE # 194
+0018 7800        R     MOV     R0,#LOW t
+001A 7402              MOV     A,#02H
+001C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 195
+001D 8013              SJMP    ?C0029
+                                           ; SOURCE LINE # 196
+001F         ?C0031:
+                                           ; SOURCE LINE # 197
+001F 7800        R     MOV     R0,#LOW t
+0021 7403              MOV     A,#03H
+0023 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 198
+0024 800C              SJMP    ?C0029
+                                           ; SOURCE LINE # 199
+0026         ?C0032:
+                                           ; SOURCE LINE # 200
+0026 7800        R     MOV     R0,#LOW t
+0028 7404              MOV     A,#04H
+002A F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 201
+002B 8005              SJMP    ?C0029
+                                           ; SOURCE LINE # 202
+002D         ?C0033:
+                                           ; SOURCE LINE # 203
+002D 7800        R     MOV     R0,#LOW t
+002F 7405              MOV     A,#05H
+0031 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 204
+0032         ?C0029:
+                                           ; SOURCE LINE # 205
+0032 7800        R     MOV     R0,#LOW t
+0034 E2                MOVX    A,@R0
+0035 FD                MOV     R5,A
+0036 7F88              MOV     R7,#088H
+0038 7E13              MOV     R6,#013H
+003A 120000      R     LCALL   __LED_SetupBlink
+                                           ; SOURCE LINE # 208
+003D 120000      R     LCALL   _LED_SetCurPwm2Led
+                                           ; SOURCE LINE # 209
+                                           ; SOURCE LINE # 210
+0040         ?C0034:
+0040 22                RET     
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 13  
+
+             ; FUNCTION __LED_SetupFault (END)
+
+             ; FUNCTION _LED_ReturnFaultInfo (BEGIN)
+                                           ; SOURCE LINE # 213
+                                           ; SOURCE LINE # 214
+                                           ; SOURCE LINE # 216
+0000 300003            JNB     POWER_badBatt,?C0035
+                                           ; SOURCE LINE # 217
+0003 7F01              MOV     R7,#01H
+0005 22                RET     
+                                           ; SOURCE LINE # 218
+0006         ?C0035:
+0006 300003            JNB     TEMP_extIsMissing,?C0038
+                                           ; SOURCE LINE # 219
+0009 7F02              MOV     R7,#02H
+000B 22                RET     
+                                           ; SOURCE LINE # 220
+000C         ?C0038:
+000C 7F00              MOV     R7,#00H
+000E 300002            JNB     chargeTempLimited,?C0040
+                                           ; SOURCE LINE # 221
+0011 7F03              MOV     R7,#03H
+                                           ; SOURCE LINE # 222
+0013         ?C0040:
+                                           ; SOURCE LINE # 223
+                                           ; SOURCE LINE # 224
+                                           ; SOURCE LINE # 225
+0013         ?C0036:
+0013 22                RET     
+             ; FUNCTION _LED_ReturnFaultInfo (END)
+
+             ; FUNCTION _LED_SetCurPwm2Led (BEGIN)
+                                           ; SOURCE LINE # 228
+                                           ; SOURCE LINE # 229
+                                           ; SOURCE LINE # 233
+0000 7800        R     MOV     R0,#LOW LED_curPwm
+0002 E2                MOVX    A,@R0
+0003 FD                MOV     R5,A
+0004 75F004            MOV     B,#04H
+0007 A4                MUL     AB
+0008 FF                MOV     R7,A
+0009 C3                CLR     C
+000A 74FF              MOV     A,#0FFH
+000C 9F                SUBB    A,R7
+000D FF                MOV     R7,A
+000E 7403              MOV     A,#03H
+0010 95F0              SUBB    A,B
+0012 FE                MOV     R6,A
+;---- Variable 'pwmVal' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 236
+0013 EF                MOV     A,R7
+0014 F5E9              MOV     PCA0CPL1,A
+                                           ; SOURCE LINE # 237
+0016 EE                MOV     A,R6
+0017 F5EA              MOV     PCA0CPH1,A
+                                           ; SOURCE LINE # 240
+0019 ED                MOV     A,R5
+001A 7004              JNZ     ?C0042
+                                           ; SOURCE LINE # 241
+001C 53DBBF            ANL     PCA0CPM1,#0BFH
+                                           ; SOURCE LINE # 242
+001F 22                RET     
+0020         ?C0042:
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 14  
+
+                                           ; SOURCE LINE # 243
+0020 E5DB              MOV     A,PCA0CPM1
+0022 5440              ANL     A,#040H
+0024 7003              JNZ     ?C0045
+                                           ; SOURCE LINE # 244
+0026 43DB40            ORL     PCA0CPM1,#040H
+                                           ; SOURCE LINE # 245
+                                           ; SOURCE LINE # 246
+                                           ; SOURCE LINE # 247
+0029         ?C0045:
+0029 22                RET     
+             ; FUNCTION _LED_SetCurPwm2Led (END)
+
+             ; FUNCTION __LED_SetConstIntensity (BEGIN)
+                                           ; SOURCE LINE # 250
+;---- Variable 'intensity' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 251
+                                           ; SOURCE LINE # 252
+0000 7800        R     MOV     R0,#LOW LED_curPwm
+0002 EF                MOV     A,R7
+0003 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 253
+0004 020000      R     LJMP    _LED_SetCurPwm2Led
+             ; FUNCTION __LED_SetConstIntensity (END)
+
+             ; FUNCTION __LED_SetupBlink (BEGIN)
+                                           ; SOURCE LINE # 257
+;---- Variable 'blinkCount' assigned to Register 'R5' ----
+;---- Variable 'blinkPeriod' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 258
+                                           ; SOURCE LINE # 259
+0000 E4                CLR     A
+0001 7800        R     MOV     R0,#LOW LED_curPwm
+0003 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 260
+0004 18                DEC     R0
+0005 ED                MOV     A,R5
+0006 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 261
+0007 E4                CLR     A
+0008 7800        R     MOV     R0,#LOW LED_curBlinkCount
+000A F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 262
+000B FC                MOV     R4,A
+000C 7D0A              MOV     R5,#0AH
+000E 120000      E     LCALL   ?C?UIDIV
+0011 7800        R     MOV     R0,#LOW LED_maxPeriod
+0013 EE                MOV     A,R6
+0014 F2                MOVX    @R0,A
+0015 08                INC     R0
+0016 EF                MOV     A,R7
+0017 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 263
+0018 E4                CLR     A
+0019 08                INC     R0
+001A F2                MOVX    @R0,A
+001B 08                INC     R0
+001C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 264
+001D 7800        R     MOV     R0,#LOW LED_blinkState
+001F F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 265
+0020 22                RET     
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 15  
+
+             ; FUNCTION __LED_SetupBlink (END)
+
+             ; FUNCTION _LED_SetupPulse (BEGIN)
+                                           ; SOURCE LINE # 268
+                                           ; SOURCE LINE # 269
+                                           ; SOURCE LINE # 273
+0000 7800        E     MOV     R0,#LOW i_s_ma
+0002 E2                MOVX    A,@R0
+0003 FE                MOV     R6,A
+0004 08                INC     R0
+0005 E2                MOVX    A,@R0
+0006 FF                MOV     R7,A
+0007 7C00              MOV     R4,#00H
+0009 7DDF              MOV     R5,#0DFH
+000B 120000      E     LCALL   ?C?LIMUL
+                                           ; SOURCE LINE # 274
+000E 120000      R     LCALL   L?0080
+0011 E2                MOVX    A,@R0
+0012 FE                MOV     R6,A
+0013 08                INC     R0
+0014 E2                MOVX    A,@R0
+0015 FF                MOV     R7,A
+0016 E4                CLR     A
+0017 7BD0              MOV     R3,#0D0H
+0019 7A07              MOV     R2,#07H
+001B F9                MOV     R1,A
+001C F8                MOV     R0,A
+001D 120000      E     LCALL   ?C?ULDIV
+                                           ; SOURCE LINE # 275
+0020 120000      R     LCALL   L?0080
+0023 E2                MOVX    A,@R0
+0024 FE                MOV     R6,A
+0025 08                INC     R0
+0026 E2                MOVX    A,@R0
+0027 2420              ADD     A,#020H
+0029 FF                MOV     R7,A
+002A E4                CLR     A
+002B 3E                ADDC    A,R6
+002C FE                MOV     R6,A
+002D E4                CLR     A
+002E 3D                ADDC    A,R5
+002F FD                MOV     R5,A
+0030 E4                CLR     A
+0031 3C                ADDC    A,R4
+0032 FC                MOV     R4,A
+0033 7800        R     MOV     R0,#LOW t
+0035 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 278
+0038 E4                CLR     A
+0039 7FFF              MOV     R7,#0FFH
+003B FE                MOV     R6,A
+003C FD                MOV     R5,A
+003D FC                MOV     R4,A
+003E 7800        R     MOV     R0,#LOW t
+0040 E2                MOVX    A,@R0
+0041 FB                MOV     R3,A
+0042 08                INC     R0
+0043 E2                MOVX    A,@R0
+0044 F9                MOV     R1,A
+0045 08                INC     R0
+0046 E2                MOVX    A,@R0
+0047 FA                MOV     R2,A
+0048 08                INC     R0
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 16  
+
+0049 E2                MOVX    A,@R0
+004A CB                XCH     A,R3
+004B F8                MOV     R0,A
+004C D3                SETB    C
+004D 120000      E     LCALL   ?C?ULCMP
+0050 4007              JC      ?C0048
+                                           ; SOURCE LINE # 279
+0052 7800        R     MOV     R0,#LOW LED_pulseMax
+0054 74FF              MOV     A,#0FFH
+0056 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 280
+0057 800A              SJMP    ?C0049
+0059         ?C0048:
+                                           ; SOURCE LINE # 281
+0059 120000      R     LCALL   L?0081
+005C 08                INC     R0
+005D E2                MOVX    A,@R0
+005E FF                MOV     R7,A
+005F 7800        R     MOV     R0,#LOW LED_pulseMax
+0061 EF                MOV     A,R7
+0062 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 282
+0063         ?C0049:
+                                           ; SOURCE LINE # 285
+0063 7800        R     MOV     R0,#LOW LED_pulseMax
+0065 E2                MOVX    A,@R0
+0066 FE                MOV     R6,A
+0067 E4                CLR     A
+0068 7806              MOV     R0,#06H
+006A         ?C0069:
+006A CE                XCH     A,R6
+006B C3                CLR     C
+006C 13                RRC     A
+006D CE                XCH     A,R6
+006E 13                RRC     A
+006F D8F9              DJNZ    R0,?C0069
+0071 7900        R     MOV     R1,#LOW LED_pulseInc+01H
+0073 F3                MOVX    @R1,A
+0074 EE                MOV     A,R6
+0075 19                DEC     R1
+0076 F3                MOVX    @R1,A
+                                           ; SOURCE LINE # 288
+0077 E4                CLR     A
+0078 7800        R     MOV     R0,#LOW LED_curPwm
+007A F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 289
+007B 7800        R     MOV     R0,#LOW LED_pulseValue
+007D F2                MOVX    @R0,A
+007E 08                INC     R0
+007F F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 290
+0080 7800        R     MOV     R0,#LOW LED_blinkState
+0082 7403              MOV     A,#03H
+0084 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 291
+0085 22                RET     
+             ; FUNCTION _LED_SetupPulse (END)
+
+             ; FUNCTION _LED_DoBlink (BEGIN)
+                                           ; SOURCE LINE # 294
+                                           ; SOURCE LINE # 295
+                                           ; SOURCE LINE # 296
+0000 7800        R     MOV     R0,#LOW LED_blinkState
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 17  
+
+0002 E2                MOVX    A,@R0
+0003 14                DEC     A
+0004 601B              JZ      ?C0054
+0006 14                DEC     A
+0007 603F              JZ      ?C0058
+0009 2402              ADD     A,#02H
+000B 7055              JNZ     ?C0060
+                                           ; SOURCE LINE # 297
+000D         ?C0052:
+                                           ; SOURCE LINE # 298
+000D 120000      R     LCALL   L?0078
+0010 EF                MOV     A,R7
+0011 6418              XRL     A,#018H
+0013 4E                ORL     A,R6
+0014 705C              JNZ     ?C0061
+                                           ; SOURCE LINE # 300
+0016 F2                MOVX    @R0,A
+0017 08                INC     R0
+0018 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 301
+0019 7800        R     MOV     R0,#LOW LED_blinkState
+001B 04                INC     A
+001C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 302
+001D 7FA0              MOV     R7,#0A0H
+                                           ; SOURCE LINE # 303
+                                           ; SOURCE LINE # 304
+001F 804E              SJMP    ?C0075
+                                           ; SOURCE LINE # 306
+0021         ?C0054:
+                                           ; SOURCE LINE # 307
+0021 120000      R     LCALL   L?0078
+0024 EF                MOV     A,R7
+0025 6406              XRL     A,#06H
+0027 4E                ORL     A,R6
+0028 7048              JNZ     ?C0061
+                                           ; SOURCE LINE # 308
+002A F2                MOVX    @R0,A
+002B 08                INC     R0
+002C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 309
+002D FF                MOV     R7,A
+002E 120000      R     LCALL   __LED_SetConstIntensity
+                                           ; SOURCE LINE # 312
+0031 7800        R     MOV     R0,#LOW LED_totBlinkCount
+0033 E2                MOVX    A,@R0
+0034 FF                MOV     R7,A
+0035 7800        R     MOV     R0,#LOW LED_curBlinkCount
+0037 E2                MOVX    A,@R0
+0038 04                INC     A
+0039 F2                MOVX    @R0,A
+003A B50706            CJNE    A,AR7,?C0056
+                                           ; SOURCE LINE # 313
+003D 7800        R     MOV     R0,#LOW LED_blinkState
+003F 7402              MOV     A,#02H
+0041 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 314
+0042 22                RET     
+0043         ?C0056:
+                                           ; SOURCE LINE # 315
+0043 E4                CLR     A
+0044 7800        R     MOV     R0,#LOW LED_blinkState
+0046 F2                MOVX    @R0,A
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 18  
+
+                                           ; SOURCE LINE # 316
+                                           ; SOURCE LINE # 317
+                                           ; SOURCE LINE # 318
+0047 22                RET     
+                                           ; SOURCE LINE # 320
+0048         ?C0058:
+                                           ; SOURCE LINE # 321
+0048 120000      R     LCALL   L?0079
+004B 18                DEC     R0
+004C E2                MOVX    A,@R0
+004D B50722            CJNE    A,AR7,?C0061
+0050 18                DEC     R0
+0051 E2                MOVX    A,@R0
+0052 B5061D            CJNE    A,AR6,?C0061
+                                           ; SOURCE LINE # 323
+0055 E4                CLR     A
+0056 7800        R     MOV     R0,#LOW LED_curPeriod
+0058 F2                MOVX    @R0,A
+0059 08                INC     R0
+005A F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 324
+005B 7800        R     MOV     R0,#LOW LED_blinkState
+005D F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 325
+005E 7800        R     MOV     R0,#LOW LED_curBlinkCount
+0060 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 326
+                                           ; SOURCE LINE # 327
+0061 22                RET     
+                                           ; SOURCE LINE # 329
+0062         ?C0060:
+                                           ; SOURCE LINE # 331
+0062 E4                CLR     A
+0063 7800        R     MOV     R0,#LOW LED_blinkState
+0065 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 332
+0066 7800        R     MOV     R0,#LOW LED_curPeriod
+0068 F2                MOVX    @R0,A
+0069 08                INC     R0
+006A F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 333
+006B 7800        R     MOV     R0,#LOW LED_curBlinkCount
+006D F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 334
+006E FF                MOV     R7,A
+006F         ?C0075:
+006F 120000      R     LCALL   __LED_SetConstIntensity
+                                           ; SOURCE LINE # 335
+                                           ; SOURCE LINE # 336
+0072         ?C0061:
+0072 22                RET     
+             ; FUNCTION _LED_DoBlink (END)
+
+             ; FUNCTION _LED_DoPulse (BEGIN)
+                                           ; SOURCE LINE # 339
+                                           ; SOURCE LINE # 340
+                                           ; SOURCE LINE # 341
+0000 7800        R     MOV     R0,#LOW LED_blinkState
+0002 E2                MOVX    A,@R0
+0003 24FC              ADD     A,#0FCH
+0005 602B              JZ      ?C0065
+0007 04                INC     A
+0008 704C              JNZ     ?C0067
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 19  
+
+                                           ; SOURCE LINE # 342
+000A         ?C0063:
+                                           ; SOURCE LINE # 343
+000A 7800        R     MOV     R0,#LOW LED_pulseInc
+000C E2                MOVX    A,@R0
+000D FE                MOV     R6,A
+000E 08                INC     R0
+000F E2                MOVX    A,@R0
+0010 FF                MOV     R7,A
+0011 7800        R     MOV     R0,#LOW LED_pulseValue+01H
+0013 E2                MOVX    A,@R0
+0014 2F                ADD     A,R7
+0015 F2                MOVX    @R0,A
+0016 18                DEC     R0
+0017 E2                MOVX    A,@R0
+0018 3E                ADDC    A,R6
+0019 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 344
+001A E2                MOVX    A,@R0
+001B 7800        R     MOV     R0,#LOW LED_curPwm
+001D F2                MOVX    @R0,A
+001E FF                MOV     R7,A
+                                           ; SOURCE LINE # 345
+001F 7800        R     MOV     R0,#LOW LED_pulseMax
+0021 E2                MOVX    A,@R0
+0022 FE                MOV     R6,A
+0023 EF                MOV     A,R7
+0024 C3                CLR     C
+0025 9E                SUBB    A,R6
+0026 4031              JC      ?C0062
+                                           ; SOURCE LINE # 346
+0028 7800        R     MOV     R0,#LOW LED_curPwm
+002A EE                MOV     A,R6
+002B F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 347
+002C 08                INC     R0
+002D 7404              MOV     A,#04H
+002F F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 348
+                                           ; SOURCE LINE # 349
+0030 8027              SJMP    ?C0062
+                                           ; SOURCE LINE # 351
+0032         ?C0065:
+                                           ; SOURCE LINE # 352
+0032 7800        R     MOV     R0,#LOW LED_pulseInc
+0034 E2                MOVX    A,@R0
+0035 FE                MOV     R6,A
+0036 08                INC     R0
+0037 E2                MOVX    A,@R0
+0038 FF                MOV     R7,A
+0039 C3                CLR     C
+003A 7800        R     MOV     R0,#LOW LED_pulseValue+01H
+003C E2                MOVX    A,@R0
+003D 9F                SUBB    A,R7
+003E F2                MOVX    @R0,A
+003F 18                DEC     R0
+0040 E2                MOVX    A,@R0
+0041 9E                SUBB    A,R6
+0042 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 353
+0043 E2                MOVX    A,@R0
+0044 FC                MOV     R4,A
+0045 08                INC     R0
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 20  
+
+0046 E2                MOVX    A,@R0
+0047 FD                MOV     R5,A
+0048 EC                MOV     A,R4
+0049 7800        R     MOV     R0,#LOW LED_curPwm
+004B F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 354
+004C ED                MOV     A,R5
+004D 4C                ORL     A,R4
+004E 7009              JNZ     ?C0062
+                                           ; SOURCE LINE # 355
+0050 08                INC     R0
+0051 7403              MOV     A,#03H
+0053 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 358
+                                           ; SOURCE LINE # 359
+                                           ; SOURCE LINE # 360
+0054 8000              SJMP    ?C0076
+                                           ; SOURCE LINE # 362
+0056         ?C0067:
+                                           ; SOURCE LINE # 363
+0056         ?C0076:
+0056 120000      R     LCALL   _LED_SetupPulse
+                                           ; SOURCE LINE # 364
+0059         ?C0062:
+                                           ; SOURCE LINE # 366
+0059 020000      R     LJMP    _LED_SetCurPwm2Led
+             ; FUNCTION _LED_DoPulse (END)
+
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 21  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+LED_pulseInc . . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0000H  2
+SPI0CKR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A2H  1
+uint16_t . . . . . . . . . . . . . . .  TYPEDEF  -----  U_INT    -----  2
+P0 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0080H  1
+PSW_OV . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D2H  1
+XOSC0CN. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B1H  1
+P1 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0090H  1
+LED_curFault . . . . . . . . . . . . .  PUBLIC   PDATA  U_CHAR   0002H  1
+P2 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A0H  1
+uint64_t . . . . . . . . . . . . . . .  TYPEDEF  -----  ARRAY    -----  8
+LED_curBlinkCount. . . . . . . . . . .  PUBLIC   PDATA  U_CHAR   0003H  1
+ADC0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0097H  1
+SI_GEN_PTR_t . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  3
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  3
+  gptr . . . . . . . . . . . . . . . .  MEMBER   -----  STRUCT   0000H  3
+SMB0CN0_MASTER . . . . . . . . . . . .  ABSBIT   -----  BIT      00C7H  1
+PCA0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00F9H  2
+RTC0KEY. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AEH  1
+EIE1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E6H  1
+SMB0CN0_ACK. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C1H  1
+EIE2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E7H  1
+LED_curState . . . . . . . . . . . . .  PUBLIC   PDATA  U_CHAR   0004H  1
+int32_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  LONG     -----  4
+TEMP_extIsMissing. . . . . . . . . . .  EXTERN   DATA   BIT      -----  1
+PSCTL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008FH  1
+IT01CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E4H  1
+CS0CN0 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B0H  1
+int16_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  INT      -----  2
+SMB0CN0_TXMODE . . . . . . . . . . . .  ABSBIT   -----  BIT      00C6H  1
+DERIVID. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E3H  1
+CS0MD1 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AFH  1
+LED_pulseMax . . . . . . . . . . . . .  PUBLIC   PDATA  U_CHAR   0005H  1
+SFRPAGE. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A7H  1
+CS0MD2 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F3H  1
+P0MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A4H  1
+CS0MD3 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F3H  1
+int64_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  ARRAY    -----  8
+P1MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A5H  1
+SI_UU32. . . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  4
+  u32. . . . . . . . . . . . . . . . .  MEMBER   -----  U_LONG   0000H  4
+  s32. . . . . . . . . . . . . . . . .  MEMBER   -----  LONG     0000H  4
+  uu16 . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+ADC0CN0_ADINT. . . . . . . . . . . . .  ABSBIT   -----  BIT      00EDH  1
+TMR2RLH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CBH  1
+P2MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A6H  1
+IE . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A8H  1
+false. . . . . . . . . . . . . . . . .  E_CONST  -----  U_CHAR   -----  1
+TMR3RLH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0093H  1
+SI_UU16. . . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  2
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  U_INT    0000H  2
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  INT      0000H  2
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+LED_totBlinkCount. . . . . . . . . . .  PUBLIC   PDATA  U_CHAR   0006H  1
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 22  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+EIP1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F6H  1
+EIP2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F7H  1
+SCON0_RB8. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009AH  1
+TMR2RLL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CAH  1
+PCA0CPH0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FCH  1
+TMR3RLL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0092H  1
+PCA0CPH1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EAH  1
+GPTR_t . . . . . . . . . . . . . . . .  TYPEDEF  -----  STRUCT   -----  3
+  memtype. . . . . . . . . . . . . . .  MEMBER   -----  U_CHAR   0000H  1
+  address. . . . . . . . . . . . . . .  MEMBER   -----  UNION    0001H  2
+POWER_state. . . . . . . . . . . . . .  EXTERN   PDATA  U_CHAR   -----  1
+SCON0_TB8. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009BH  1
+CS0CN0_CSEN. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B7H  1
+B_B0 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F0H  1
+DP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0082H  2
+PCA0CPH2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ECH  1
+B_B1 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F1H  1
+ADC0GT . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00C3H  2
+B_B2 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F2H  1
+PCA0CPL0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FBH  1
+B_B3 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F3H  1
+PCA0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D9H  1
+PCA0CPM0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DAH  1
+PCA0CPL1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E9H  1
+B_B4 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F4H  1
+PCA0CPM1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DBH  1
+PCA0CPL2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EBH  1
+B_B5 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F5H  1
+PCA0CPM2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DCH  1
+IP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B8H  1
+ADC0TK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BCH  1
+B_B6 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F6H  1
+ADC0LT . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00C5H  2
+IREF0CN0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D6H  1
+SCON0_MCE. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009DH  1
+B_B7 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F7H  1
+__LED_SetConstIntensity. . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  intensity. . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0007H  1
+LED_Update . . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  t. . . . . . . . . . . . . . . . . .  AUTO     PDATA  U_CHAR   0000H  1
+XBR0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E1H  1
+SMB0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C1H  1
+__LED_SetupBlink . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  blinkPeriod. . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+  blinkCount . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0005H  1
+XBR1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E2H  1
+CS0SCAN0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D2H  1
+SMB0CN0_STA. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C5H  1
+XBR2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E3H  1
+CS0SCAN1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D3H  1
+ADC0MX . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0096H  1
+ACC_ACC0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E0H  1
+REF0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D1H  1
+HFO0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B2H  1
+CKCON0 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008EH  1
+ACC_ACC1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E1H  1
+REG0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C9H  1
+CRC0IN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0085H  1
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 23  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+TMR2CN0_TR2. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CAH  1
+ACC_ACC2 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E2H  1
+ACC_ACC3 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E3H  1
+SP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0081H  1
+CMP0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009DH  1
+ACC_ACC4 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E4H  1
+PCA0CN0_CCF0 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D8H  1
+ACC_ACC5 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E5H  1
+POWER_badBatt. . . . . . . . . . . . .  EXTERN   DATA   BIT      -----  1
+PCA0CN0_CCF1 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D9H  1
+ACC_ACC6 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E6H  1
+TMR2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00CCH  2
+PCA0CN0_CCF2 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DAH  1
+ACC_ACC7 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E7H  1
+TMR3 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0094H  2
+CS0CN0_CSCMPF. . . . . . . . . . . . .  ABSBIT   -----  BIT      00B0H  1
+_LED_ReturnFaultInfo . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+__LED_SetupFault . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  f. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0007H  1
+  t. . . . . . . . . . . . . . . . . .  AUTO     PDATA  U_CHAR   0000H  1
+SMB0CN0_ACKRQ. . . . . . . . . . . . .  ABSBIT   -----  BIT      00C3H  1
+VDM0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FFH  1
+P0MDIN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F1H  1
+SCON0_REN. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009CH  1
+P1MDIN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F2H  1
+CS0THH . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FEH  1
+SMB0CN0_STO. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C4H  1
+PMU0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B5H  1
+P0MASK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C7H  1
+bool . . . . . . . . . . . . . . . . .  TYPEDEF  DATA   BIT      -----  1
+P1MASK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BFH  1
+SI_GEN_PTR . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  3
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  3
+  gptr . . . . . . . . . . . . . . . .  MEMBER   -----  STRUCT   0000H  3
+CS0THL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FDH  1
+PSW_RS0. . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D3H  1
+PCA0CN0_CF . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DFH  1
+SPI0CN0_RXOVRN . . . . . . . . . . . .  ABSBIT   -----  BIT      00FCH  1
+PSW_RS1. . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D4H  1
+TMR2CN0_T2XCLK0. . . . . . . . . . . .  ABSBIT   -----  BIT      00C8H  1
+TMR2CN0_T2XCLK1. . . . . . . . . . . .  ABSBIT   -----  BIT      00C9H  1
+ADC0CN0_ADEN . . . . . . . . . . . . .  ABSBIT   -----  BIT      00EFH  1
+TMOD . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0089H  1
+TCON . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0088H  1
+PMU0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B5H  1
+__LED_SetNormalState . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  s. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0007H  1
+PMU0FL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CEH  1
+CRC0FLIP . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009CH  1
+_LED_SetupPulse. . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  t. . . . . . . . . . . . . . . . . .  AUTO     PDATA  U_LONG   0000H  4
+PSW_PARITY . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D0H  1
+IE_ES0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ACH  1
+CMP0MX . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009FH  1
+LED_curPwm . . . . . . . . . . . . . .  PUBLIC   PDATA  U_CHAR   0007H  1
+IE_ET0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A9H  1
+_LED_ReturnCurNormalState. . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+IE_ET1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ABH  1
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 24  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+P0SKIP . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D4H  1
+IE_ET2 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ADH  1
+P1SKIP . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D5H  1
+ADC0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E8H  1
+IE_EX0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A8H  1
+_LED_DoBlink . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+PCA0CN0_CR . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DEH  1
+IE_EX1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AAH  1
+SCON0_SMODE. . . . . . . . . . . . . .  ABSBIT   -----  BIT      009FH  1
+CLKSEL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A9H  1
+SPI0CN0_SPIEN. . . . . . . . . . . . .  ABSBIT   -----  BIT      00F8H  1
+B. . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F0H  1
+ADC0H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BEH  1
+true . . . . . . . . . . . . . . . . .  E_CONST  -----  U_CHAR   -----  1
+CRC0AUTO . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009EH  1
+CS0CN0_CSBUSY. . . . . . . . . . . . .  ABSBIT   -----  BIT      00B4H  1
+ADC0CN0_ADBMEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00EEH  1
+TMR2RL . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00CAH  2
+ADC0L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BDH  1
+TMR3RL . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0092H  2
+PCA0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D8H  1
+ACC. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E0H  1
+PCA0CP0. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00FBH  2
+PCA0CP1. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00E9H  2
+PCA0CP2. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00EBH  2
+CRC0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0084H  1
+LED_Init . . . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  t. . . . . . . . . . . . . . . . . .  AUTO     PDATA  U_CHAR   0000H  1
+TH0. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008CH  1
+IP_PS0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BCH  1
+TH1. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008DH  1
+PCA0H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FAH  1
+LED_blinkState . . . . . . . . . . . .  PUBLIC   PDATA  U_CHAR   0008H  1
+IP_PT0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B9H  1
+IP_PT1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BBH  1
+uint8_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  U_CHAR   -----  1
+SMB0CN0_ARBLOST. . . . . . . . . . . .  ABSBIT   -----  BIT      00C2H  1
+IP_PT2 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BDH  1
+TL0. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008AH  1
+CS0CF. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AAH  1
+SPI0CN0_TXBMT. . . . . . . . . . . . .  ABSBIT   -----  BIT      00F9H  1
+PSW_F0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D5H  1
+IE_ESPI0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AEH  1
+TL1. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008BH  1
+PCA0L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F9H  1
+SMB0CN0_SI . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C0H  1
+PSW_F1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D1H  1
+P0_B0. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0080H  1
+IP_PX0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B8H  1
+P1_B0. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0090H  1
+P0_B1. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0081H  1
+IP_PX1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BAH  1
+CS0DH. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EEH  1
+CMP0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009BH  1
+chargeTempLimited. . . . . . . . . . .  EXTERN   DATA   BIT      -----  1
+TCON_IE0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0089H  1
+P1_B1. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0091H  1
+P0_B2. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0082H  1
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 25  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+TCON_IE1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008BH  1
+P1_B2. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0092H  1
+P0_B3. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0083H  1
+SMB0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C0H  1
+_LED_DoPulse . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+P1_B3. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0093H  1
+P0_B4. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0084H  1
+P1_B4. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0094H  1
+P0_B5. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0085H  1
+CS0DL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EDH  1
+P1_B5. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0095H  1
+P0_B6. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0086H  1
+P1_B6. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0096H  1
+P0_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0087H  1
+int8_t . . . . . . . . . . . . . . . .  TYPEDEF  -----  CHAR     -----  1
+P1_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0097H  1
+P2_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A7H  1
+DPH. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0083H  1
+ADC0GTH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C4H  1
+TMR2CN0_TF2H . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CFH  1
+TMR2CN0_T2SPLIT. . . . . . . . . . . .  ABSBIT   -----  BIT      00CBH  1
+PSW_AC . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D6H  1
+SPI0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F8H  1
+HFO0CAL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B3H  1
+CS0SE. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DEH  1
+TCON_TF0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008DH  1
+SCON0_RI . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0098H  1
+DPL. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0082H  1
+TCON_TF1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008FH  1
+SBUF0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0099H  1
+PCON0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0087H  1
+IREF0CF. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B9H  1
+ADC0GTL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C3H  1
+SI_UU32_t. . . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  4
+  u32. . . . . . . . . . . . . . . . .  MEMBER   -----  U_LONG   0000H  4
+  s32. . . . . . . . . . . . . . . . .  MEMBER   -----  LONG     0000H  4
+  uu16 . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+TMR2CN0_TF2L . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CEH  1
+SCON0_TI . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0099H  1
+ADC0CN0_ADCM0. . . . . . . . . . . . .  ABSBIT   -----  BIT      00E8H  1
+ADC0LTH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C6H  1
+LED_pulseValue . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0009H  2
+TCON_IT0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0088H  1
+CS0CN0_CSPME . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B1H  1
+ADC0CN0_ADCM1. . . . . . . . . . . . .  ABSBIT   -----  BIT      00E9H  1
+RSTSRC . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EFH  1
+P0MAT. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D7H  1
+CRC0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0086H  1
+SI_UU16_t. . . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  2
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  U_INT    0000H  2
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  INT      0000H  2
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+TCON_IT1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008AH  1
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 26  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+ADC0CN0_ADCM2. . . . . . . . . . . . .  ABSBIT   -----  BIT      00EAH  1
+SCON0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0098H  1
+P1MAT. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CFH  1
+CS0PM. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DEH  1
+LED_maxPeriod. . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    000BH  2
+ADC0CN0_ADWINT . . . . . . . . . . . .  ABSBIT   -----  BIT      00EBH  1
+ADC0CN0_ADBUSY . . . . . . . . . . . .  ABSBIT   -----  BIT      00ECH  1
+SMB0ADM. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F5H  1
+ADC0LTL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C5H  1
+SPI0CN0_MODF . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FDH  1
+IP_PSPI0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BEH  1
+CS0CN0_CSEOS . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B6H  1
+TMR2CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C8H  1
+LED_curPeriod. . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    000DH  2
+TMR3CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0091H  1
+i_s_ma . . . . . . . . . . . . . . . .  EXTERN   PDATA  U_INT    -----  2
+SMB0ADR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F4H  1
+TCON_TR0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008CH  1
+CS0CN0_CSINT . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B5H  1
+CS0MX. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ABH  1
+TMR2CN0_TF2CEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00CCH  1
+TCON_TR1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008EH  1
+SMB0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C2H  1
+P0DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0099H  1
+CS0SS. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DDH  1
+AUX. . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0080H  1
+TMR2H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CDH  1
+SPI0CFG. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A1H  1
+P1DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009BH  1
+_LED_SetCurPwm2Led . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  pwmVal . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+TMR3H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0095H  1
+P2DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009DH  1
+CRC0CNT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009AH  1
+chargeState. . . . . . . . . . . . . .  EXTERN   PDATA  U_CHAR   -----  1
+TMR2L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CCH  1
+RTC0ADR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ACH  1
+SPI0CN0_SPIF . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FFH  1
+TMR3L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0094H  1
+ADC0PWR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BBH  1
+IE_EA. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AFH  1
+RTC0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ADH  1
+CS0CN0_CSCMPEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00B3H  1
+FLSCL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B6H  1
+TMR2CN0_TF2LEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00CDH  1
+SPI0CN0_WCOL . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FEH  1
+SPI0CN0_NSSMD0 . . . . . . . . . . . .  ABSBIT   -----  BIT      00FAH  1
+PSW_CY . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D7H  1
+SPI0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A3H  1
+SPI0CN0_NSSMD1 . . . . . . . . . . . .  ABSBIT   -----  BIT      00FBH  1
+ADC0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00BDH  2
+TOFFH. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008EH  1
+PSW. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D0H  1
+PCA0PWM. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DFH  1
+REVID. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E2H  1
+TOFFL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008DH  1
+FLKEY. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B7H  1
+uint32_t . . . . . . . . . . . . . . .  TYPEDEF  -----  U_LONG   -----  4
+C51 COMPILER V9.60.0.0   LED                                                               02/10/2023 13:46:30 PAGE 27  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+ADC0AC . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BAH  1
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =    732    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =     15       7
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+   EDATA SIZE       =   ----    ----
+   HDATA SIZE       =   ----    ----
+   XDATA CONST SIZE =   ----    ----
+   FAR CONST SIZE   =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

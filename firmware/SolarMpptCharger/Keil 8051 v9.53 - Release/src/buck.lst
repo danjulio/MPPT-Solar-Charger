@@ -1,0 +1,1145 @@
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 1   
+
+
+C51 COMPILER V9.60.0.0, COMPILATION OF MODULE BUCK
+OBJECT MODULE PLACED IN .\src/buck.OBJ
+COMPILER INVOKED BY: Z:\Applications\Simplicity Studio.app\Contents\Eclipse\developer\toolchains\keil_8051\9.60\BIN\C51.
+                    -exe /Users/danjulio/SimplicityStudio/v4_workspace/SolarMpptCharger/src/buck.c OMF2 COMPACT DEBUG OBJECTEXTEND ROM(LARGE)
+                    - WARNINGLEVEL(2) FLOATFUZZY(3) OPTIMIZE(9,SPEED) DEFINE(NDEBUG=1) INTVECTOR(0X0000) INTPROMOTE INCDIR(/Users/danjulio/Si
+                    -mplicityStudio/v4_workspace/SolarMpptCharger/inc;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/805
+                    -1/v4.1.7//Device/shared/si8051Base;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/8051/v4.1.7//Devi
+                    -ce/EFM8SB1/inc) REGFILE(SolarMpptCharger.ORC) PRINT(.\src/buck.lst) COND SYMBOLS CODE PAGEWIDTH(120) PAGELENGTH(65) OBJE
+                    -CT(.\src/buck.OBJ)
+
+line level    source
+
+   1          /*
+   2           * buck.c
+   3           *
+   4           * Buck converter control module.
+   5           *   - Controls an approximately 24 kHz PWM output for driving a buck-topology converter
+   6           *   - Duty cycle computed to regulate input voltage (from solar panel) to MPPT set-point
+   7           *     with output voltage equal to current measured battery voltage
+   8           *   - Ability to limit based on upper battery voltage threshold (current charge threshold)
+   9           *     and over-current conditions
+  10           *
+  11           * Copyright (c) 2018-2019 danjuliodesigns, LLC.  All rights reserved.
+  12           *
+  13           * SolarMpptCharger is free software: you can redistribute it and/or modify it
+  14           * under the terms of the GNU Lesser General Public License as published
+  15           * by the Free Software Foundation, either version 3 of the License, or
+  16           * (at your option) any later version.
+  17           *
+  18           * SolarMpptCharger is distributed in the hope that it will be useful,
+  19           * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  20           * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  21           * GNU Lesser General Public License for more details.
+  22           *
+  23           * See <http://www.gnu.org/licenses/>.
+  24           *
+  25           */
+  26          #include "buck.h"
+  27          #include "adc.h"
+  28          #include "config.h"
+  29          #include "param.h"
+  30          #include "smbus.h"
+  31          
+  32          
+  33          //-----------------------------------------------------------------------------
+  34          // Efficiency lookup table - efficiency (percent) as a function of input power (mW)
+  35          //   determined via hardware measurement
+  36          //-----------------------------------------------------------------------------
+  37          #define BUCK_NUM_EFF_ENTRIES 22
+  38          code const uint16_t buckEffPowerPoints[BUCK_NUM_EFF_ENTRIES] = {
+  39                          250, 375, 500, 750, 1000, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000, 3250, 3500, 4000, 5000, 6000, 
+             -7500, 11500, 25000, 35000
+  40          };
+  41          code const uint8_t buckEffValues[BUCK_NUM_EFF_ENTRIES] = {
+  42                          56,  62,  67,  71,  75,   77,   78,   80,   81,   83,   84,   85,   86,   87,   88,   89,   90,   91,   
+             -92,   93,    93,    92
+  43          };
+  44          
+  45          
+  46          
+  47          //-----------------------------------------------------------------------------
+  48          // Variables
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 2   
+
+  49          //-----------------------------------------------------------------------------
+  50          volatile uint16_t SI_SEG_IDATA buckCurVal;
+  51          volatile uint16_t SI_SEG_IDATA buckBattRegMv;
+  52          volatile uint16_t SI_SEG_IDATA buckSolarRegMv;
+  53          volatile bool buckEnable;
+  54          volatile bool buckLimitEnable;  // Enable for battery voltage limiting
+  55          volatile bool buckLimit1;       // Over-current or over-voltage limit
+  56          volatile bool buckLimit2;       // Regulated voltage above min
+  57          
+  58          
+  59          
+  60          //-----------------------------------------------------------------------------
+  61          // Internal Routine forward declarations
+  62          //-----------------------------------------------------------------------------
+  63          void _BUCK_UpdatePwmOutput();
+  64          
+  65          
+  66          
+  67          //-----------------------------------------------------------------------------
+  68          // API routines
+  69          //-----------------------------------------------------------------------------
+  70          void BUCK_Init()
+  71          {
+  72   1              buckEnable = false;
+  73   1              buckLimitEnable = true;
+  74   1              buckCurVal = 0;
+  75   1              buckLimit1 = false;
+  76   1              buckLimit2 = false;
+  77   1              buckBattRegMv = PARAM_GetFloatMv();
+  78   1              buckSolarRegMv = V_MIN_GOOD_SOLAR;
+  79   1              _BUCK_UpdatePwmOutput();
+  80   1      }
+  81          
+  82          
+  83          void BUCK_SetSolarVoltage(uint16_t v)
+  84          {
+  85   1              // Atomically set input regulation voltage (since BUCK_Update is executed in Timer0 ISR)
+  86   1              _ADC_DIS_TMR0();
+  87   1              buckSolarRegMv = v;
+  88   1              _ADC_EN_TMR0();
+  89   1      }
+  90          
+  91          
+  92          void BUCK_SetBattVoltage(uint16_t v)
+  93          {
+  94   1              // Atomically set output regulation voltage
+  95   1              _ADC_DIS_TMR0();
+  96   1              buckBattRegMv = v;
+  97   1              _ADC_EN_TMR0();
+  98   1      }
+  99          
+ 100          
+ 101          void BUCK_EnableRegulate(bool en)
+ 102          {
+ 103   1              uint32_t t;
+ 104   1      
+ 105   1              if (en) {
+ 106   2                      if (!buckEnable) {
+ 107   3                              // Configure an initial regulator PWM guess based on a simple CCM
+ 108   3                              // calculation using input and output voltages to get us in the ballpark
+ 109   3                              t = (uint32_t) BUCK_PWM_MAX * (uint32_t) buckBattRegMv;
+ 110   3                              buckCurVal = (uint16_t) (t / (uint32_t) buckSolarRegMv);
+ 111   3                              if (buckCurVal > BUCK_PWM_MAX) {
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 3   
+
+ 112   4                                      buckCurVal = BUCK_PWM_MAX;
+ 113   4                              }
+ 114   3                              _BUCK_UpdatePwmOutput();
+ 115   3      
+ 116   3                              // Enable regulator last
+ 117   3                              buckEnable = true;
+ 118   3                      }
+ 119   2              } else {
+ 120   2                      if (buckEnable) {
+ 121   3                              // Disable regulator first
+ 122   3                              buckEnable = false;
+ 123   3      
+ 124   3                              // Disable output
+ 125   3                              buckCurVal = 0;
+ 126   3                              buckLimit1 = false;
+ 127   3                              buckLimit2 = false;
+ 128   3                              _BUCK_UpdatePwmOutput();
+ 129   3      
+ 130   3                              // Note buck is off in BUCK STATUS
+ 131   3                              SMB_SetBuckStatus(0);
+ 132   3                      }
+ 133   2              }
+ 134   1      }
+ 135          
+ 136          
+ 137          void BUCK_EnableBatteryLimit(bool en) {
+ 138   1              buckLimitEnable = en;
+ 139   1      }
+ 140          
+ 141          
+ 142          void BUCK_Update()
+ 143          {
+ 144   1              uint16_t solarMv;
+ 145   1              uint16_t battMv;
+ 146   1              uint16_t solarMa;
+ 147   1      
+ 148   1              if (buckEnable) {
+ 149   2                      // Get the current system measurements
+ 150   2                      solarMv = ADC_GetValueForIsr(ADC_MEAS_VS_INDEX);
+ 151   2                      battMv = ADC_GetValueForIsr(ADC_MEAS_VB_INDEX);
+ 152   2                      solarMa = ADC_GetValueForIsr(ADC_MEAS_IS_INDEX);
+ 153   2      
+ 154   2                      // Compute limiting flags
+ 155   2                      //  buckLimit1 : Over-voltage or Over-current condition (Decrease power transfer)
+ 156   2                      //  buckLimit2 : Battery voltage at or above charge threshold (no need to increase power transfer)
+ 157   2                      buckLimit1 = (buckLimitEnable && (battMv > (buckBattRegMv + V_BUCK_HYST))) || (solarMa > I_SOLAR_MAX);
+ 158   2                      buckLimit2 = buckLimitEnable && (battMv >= (buckBattRegMv - V_BUCK_HYST));
+ 159   2      
+ 160   2                      // Evaluate buck regulator
+ 161   2                      if ((solarMv < buckSolarRegMv) || buckLimit1) {
+ 162   3                              // Decrease power transfer to try to bring solarMv up
+ 163   3                              if (buckCurVal > BUCK_PWM_MIN) {
+ 164   4                                      buckCurVal--;
+ 165   4                                      _BUCK_UpdatePwmOutput();
+ 166   4                              }
+ 167   3                      } else if ((solarMv > buckSolarRegMv) && !buckLimit2) {
+ 168   3                              // Increase power transfer to try to bring solarMv down
+ 169   3                              if (buckCurVal < BUCK_PWM_MAX) {
+ 170   4                                      buckCurVal++;
+ 171   4                                      _BUCK_UpdatePwmOutput();
+ 172   4                              }
+ 173   3                      }
+ 174   2      
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 4   
+
+ 175   2                      // Update SMBus BUCK STATUS
+ 176   2                      //  Re-use SolarMv to build up register contents
+ 177   2                      solarMv = buckCurVal << 6;
+ 178   2                      if (buckLimit1) solarMv |= 0x0001;
+ 179   2                      if (buckLimit2) solarMv |= 0x0002;
+ 180   2                      SMB_SetBuckStatus(solarMv);
+ 181   2              }
+ 182   1      }
+ 183          
+ 184          
+ 185          uint8_t BUCK_GetEfficiency(uint16_t ps)
+ 186          {
+ 187   1              uint8_t i = 0;
+ 188   1      
+ 189   1              // Find the efficiency value for the first power point immediately
+ 190   1              // above the current solar power input
+ 191   1              while (i < (BUCK_NUM_EFF_ENTRIES-1)) {
+ 192   2                      if (ps < buckEffPowerPoints[i]) {
+ 193   3                              break;
+ 194   3                      }
+ 195   2                      i++;
+ 196   2              }
+ 197   1      
+ 198   1              return(buckEffValues[i]);
+ 199   1      }
+ 200          
+ 201          
+ 202          
+ 203          //-----------------------------------------------------------------------------
+ 204          // Internal Routines
+ 205          //-----------------------------------------------------------------------------
+ 206          
+ 207          //
+ 208          // Input: buckCurVal
+ 209          //
+ 210          void _BUCK_UpdatePwmOutput()
+ 211          {
+ 212   1              uint16_t pwmVal;
+ 213   1      
+ 214   1              pwmVal = BUCK_PWM_MAX - buckCurVal;
+ 215   1      
+ 216   1              // Load the PWM value
+ 217   1              PCA0CPL0 = pwmVal & 0xFF;
+ 218   1              PCA0CPH0 = pwmVal >> 8;
+ 219   1      
+ 220   1              // ECOM0 must be cleared if value is 0 to completely disable PWM
+ 221   1              if (buckCurVal == 0) {
+ 222   2                      PCA0CPM0 &= ~0x40;         // Clear ECOM0 to disable output
+ 223   2              } else {
+ 224   2                      if ((PCA0CPM0 & 0x40) == 0x00) {
+ 225   3                              PCA0CPM0 |= 0x40;          // Set ECOM0 when BUCK is not 0
+ 226   3                      }
+ 227   2              }
+ 228   1      }
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 5   
+
+ASSEMBLY LISTING OF GENERATED OBJECT CODE
+
+
+             ; FUNCTION Com0027 (BEGIN)
+0000         L?0040:
+0000 E6                MOV     A,@R0
+0001 FF                MOV     R7,A
+0002 7800        R     MOV     R0,#LOW solarMv+01H
+0004 E2                MOVX    A,@R0
+0005 9F                SUBB    A,R7
+0006 18                DEC     R0
+0007 E2                MOVX    A,@R0
+0008 9E                SUBB    A,R6
+0009 22                RET     
+000A         L?0041:
+000A E4                CLR     A
+000B 7800        R     MOV     R0,#LOW buckCurVal
+000D F6                MOV     @R0,A
+000E 08                INC     R0
+000F F6                MOV     @R0,A
+0010 C200        R     CLR     buckLimit1
+0012 C200        R     CLR     buckLimit2
+0014 22                RET     
+             ; FUNCTION Com0027 (END)
+
+             ; FUNCTION BUCK_Init (BEGIN)
+                                           ; SOURCE LINE # 70
+                                           ; SOURCE LINE # 71
+                                           ; SOURCE LINE # 72
+0000 C200        R     CLR     buckEnable
+                                           ; SOURCE LINE # 73
+0002 D200        R     SETB    buckLimitEnable
+                                           ; SOURCE LINE # 74
+                                           ; SOURCE LINE # 75
+                                           ; SOURCE LINE # 76
+0004 120000      R     LCALL   L?0041
+                                           ; SOURCE LINE # 77
+0007 120000      E     LCALL   PARAM_GetFloatMv
+000A 7800        R     MOV     R0,#LOW buckBattRegMv
+000C A606              MOV     @R0,AR6
+000E 08                INC     R0
+000F A607              MOV     @R0,AR7
+                                           ; SOURCE LINE # 78
+0011 7800        R     MOV     R0,#LOW buckSolarRegMv
+0013 7646              MOV     @R0,#046H
+0015 08                INC     R0
+0016 7650              MOV     @R0,#050H
+                                           ; SOURCE LINE # 79
+0018 020000      R     LJMP    _BUCK_UpdatePwmOutput
+             ; FUNCTION BUCK_Init (END)
+
+             ; FUNCTION _BUCK_SetSolarVoltage (BEGIN)
+                                           ; SOURCE LINE # 83
+;---- Variable 'v' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 84
+                                           ; SOURCE LINE # 86
+0000 C2A9              CLR     IE_ET0
+                                           ; SOURCE LINE # 87
+0002 7800        R     MOV     R0,#LOW buckSolarRegMv
+0004 A606              MOV     @R0,AR6
+0006 08                INC     R0
+0007 A607              MOV     @R0,AR7
+                                           ; SOURCE LINE # 88
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 6   
+
+0009 D2A9              SETB    IE_ET0
+                                           ; SOURCE LINE # 89
+000B 22                RET     
+             ; FUNCTION _BUCK_SetSolarVoltage (END)
+
+             ; FUNCTION _BUCK_SetBattVoltage (BEGIN)
+                                           ; SOURCE LINE # 92
+;---- Variable 'v' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 93
+                                           ; SOURCE LINE # 95
+0000 C2A9              CLR     IE_ET0
+                                           ; SOURCE LINE # 96
+0002 7800        R     MOV     R0,#LOW buckBattRegMv
+0004 A606              MOV     @R0,AR6
+0006 08                INC     R0
+0007 A607              MOV     @R0,AR7
+                                           ; SOURCE LINE # 97
+0009 D2A9              SETB    IE_ET0
+                                           ; SOURCE LINE # 98
+000B 22                RET     
+             ; FUNCTION _BUCK_SetBattVoltage (END)
+
+             ; FUNCTION BUCK_EnableRegulate (BEGIN)
+                                           ; SOURCE LINE # 101
+                                           ; SOURCE LINE # 102
+                                           ; SOURCE LINE # 105
+0000 300056            JNB     en,?C0004
+                                           ; SOURCE LINE # 106
+0003 200064            JB      buckEnable,?C0009
+                                           ; SOURCE LINE # 109
+0006 7800        R     MOV     R0,#LOW buckBattRegMv
+0008 E6                MOV     A,@R0
+0009 FE                MOV     R6,A
+000A 08                INC     R0
+000B E6                MOV     A,@R0
+000C FF                MOV     R7,A
+000D 7C03              MOV     R4,#03H
+000F 7DFF              MOV     R5,#0FFH
+0011 120000      E     LCALL   ?C?LIMUL
+0014 7800        R     MOV     R0,#LOW t
+0016 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 110
+0019 7800        R     MOV     R0,#LOW buckSolarRegMv
+001B E6                MOV     A,@R0
+001C FE                MOV     R6,A
+001D 08                INC     R0
+001E E6                MOV     A,@R0
+001F FF                MOV     R7,A
+0020 E4                CLR     A
+0021 FC                MOV     R4,A
+0022 FD                MOV     R5,A
+0023 C004              PUSH    AR4
+0025 A905              MOV     R1,AR5
+0027 AA06              MOV     R2,AR6
+0029 AB07              MOV     R3,AR7
+002B 7800        R     MOV     R0,#LOW t
+002D E2                MOVX    A,@R0
+002E FC                MOV     R4,A
+002F 08                INC     R0
+0030 E2                MOVX    A,@R0
+0031 FD                MOV     R5,A
+0032 08                INC     R0
+0033 E2                MOVX    A,@R0
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 7   
+
+0034 FE                MOV     R6,A
+0035 08                INC     R0
+0036 E2                MOVX    A,@R0
+0037 FF                MOV     R7,A
+0038 D000              POP     AR0
+003A 120000      E     LCALL   ?C?ULDIV
+003D 7800        R     MOV     R0,#LOW buckCurVal
+003F A606              MOV     @R0,AR6
+0041 08                INC     R0
+0042 A607              MOV     @R0,AR7
+                                           ; SOURCE LINE # 111
+0044 D3                SETB    C
+0045 E6                MOV     A,@R0
+0046 94FF              SUBB    A,#0FFH
+0048 18                DEC     R0
+0049 E6                MOV     A,@R0
+004A 9403              SUBB    A,#03H
+004C 4005              JC      ?C0006
+                                           ; SOURCE LINE # 112
+004E 7603              MOV     @R0,#03H
+0050 08                INC     R0
+0051 76FF              MOV     @R0,#0FFH
+                                           ; SOURCE LINE # 113
+0053         ?C0006:
+                                           ; SOURCE LINE # 114
+0053 120000      R     LCALL   _BUCK_UpdatePwmOutput
+                                           ; SOURCE LINE # 117
+0056 D200        R     SETB    buckEnable
+                                           ; SOURCE LINE # 118
+                                           ; SOURCE LINE # 119
+0058 22                RET     
+0059         ?C0004:
+                                           ; SOURCE LINE # 120
+0059 30000E            JNB     buckEnable,?C0009
+                                           ; SOURCE LINE # 122
+005C C200        R     CLR     buckEnable
+                                           ; SOURCE LINE # 125
+                                           ; SOURCE LINE # 126
+                                           ; SOURCE LINE # 127
+005E 120000      R     LCALL   L?0041
+                                           ; SOURCE LINE # 128
+0061 120000      R     LCALL   _BUCK_UpdatePwmOutput
+                                           ; SOURCE LINE # 131
+0064 E4                CLR     A
+0065 FF                MOV     R7,A
+0066 FE                MOV     R6,A
+0067 120000      E     LCALL   _SMB_SetBuckStatus
+                                           ; SOURCE LINE # 132
+                                           ; SOURCE LINE # 133
+                                           ; SOURCE LINE # 134
+006A         ?C0009:
+006A 22                RET     
+             ; FUNCTION BUCK_EnableRegulate (END)
+
+             ; FUNCTION BUCK_EnableBatteryLimit (BEGIN)
+                                           ; SOURCE LINE # 137
+                                           ; SOURCE LINE # 138
+0000 A200        R     MOV     C,en
+0002 9200        R     MOV     buckLimitEnable,C
+                                           ; SOURCE LINE # 139
+0004 22                RET     
+             ; FUNCTION BUCK_EnableBatteryLimit (END)
+
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 8   
+
+             ; FUNCTION BUCK_Update (BEGIN)
+                                           ; SOURCE LINE # 142
+                                           ; SOURCE LINE # 143
+                                           ; SOURCE LINE # 148
+0000 200003      R     JB      buckEnable,$ + 6H
+0003 020000      R     LJMP    ?C0026
+                                           ; SOURCE LINE # 150
+0006 E4                CLR     A
+0007 FF                MOV     R7,A
+0008 120000      E     LCALL   _ADC_GetValueForIsr
+000B 7800        R     MOV     R0,#LOW solarMv
+000D EE                MOV     A,R6
+000E F2                MOVX    @R0,A
+000F 08                INC     R0
+0010 EF                MOV     A,R7
+0011 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 151
+0012 7F02              MOV     R7,#02H
+0014 120000      E     LCALL   _ADC_GetValueForIsr
+0017 7800        R     MOV     R0,#LOW battMv
+0019 EE                MOV     A,R6
+001A F2                MOVX    @R0,A
+001B 08                INC     R0
+001C EF                MOV     A,R7
+001D F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 152
+001E 7F01              MOV     R7,#01H
+0020 120000      E     LCALL   _ADC_GetValueForIsr
+;---- Variable 'solarMa' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 157
+0023 300014            JNB     buckLimitEnable,?C0015
+0026 7800        R     MOV     R0,#LOW buckBattRegMv+01H
+0028 E6                MOV     A,@R0
+0029 240F              ADD     A,#0FH
+002B FD                MOV     R5,A
+002C 18                DEC     R0
+002D E4                CLR     A
+002E 36                ADDC    A,@R0
+002F FC                MOV     R4,A
+0030 D3                SETB    C
+0031 7800        R     MOV     R0,#LOW battMv+01H
+0033 E2                MOVX    A,@R0
+0034 9D                SUBB    A,R5
+0035 18                DEC     R0
+0036 E2                MOVX    A,@R0
+0037 9C                SUBB    A,R4
+0038 5009              JNC     ?C0014
+003A         ?C0015:
+003A D3                SETB    C
+003B EF                MOV     A,R7
+003C 94D0              SUBB    A,#0D0H
+003E EE                MOV     A,R6
+003F 9407              SUBB    A,#07H
+0041 4003              JC      ?C0012
+0043         ?C0014:
+0043 D3                SETB    C
+0044 8001              SJMP    ?C0013
+0046         ?C0012:
+0046 C3                CLR     C
+0047         ?C0013:
+0047 9200        R     MOV     buckLimit1,C
+                                           ; SOURCE LINE # 158
+0049 300018            JNB     buckLimitEnable,?C0016
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 9   
+
+004C 7800        R     MOV     R0,#LOW buckBattRegMv+01H
+004E E6                MOV     A,@R0
+004F 24F1              ADD     A,#0F1H
+0051 FF                MOV     R7,A
+0052 18                DEC     R0
+0053 E6                MOV     A,@R0
+0054 34FF              ADDC    A,#0FFH
+0056 FE                MOV     R6,A
+0057 C3                CLR     C
+0058 7800        R     MOV     R0,#LOW battMv+01H
+005A E2                MOVX    A,@R0
+005B 9F                SUBB    A,R7
+005C 18                DEC     R0
+005D E2                MOVX    A,@R0
+005E 9E                SUBB    A,R6
+005F 4003              JC      ?C0016
+0061 D3                SETB    C
+0062 8001              SJMP    ?C0017
+0064         ?C0016:
+0064 C3                CLR     C
+0065         ?C0017:
+0065 9200        R     MOV     buckLimit2,C
+                                           ; SOURCE LINE # 161
+0067 7800        R     MOV     R0,#LOW buckSolarRegMv
+0069 E6                MOV     A,@R0
+006A FE                MOV     R6,A
+006B 08                INC     R0
+006C C3                CLR     C
+006D 120000      R     LCALL   L?0040
+0070 4003              JC      ?C0019
+0072 300015            JNB     buckLimit1,?C0018
+0075         ?C0019:
+                                           ; SOURCE LINE # 163
+0075 D3                SETB    C
+0076 7800        R     MOV     R0,#LOW buckCurVal+01H
+0078 E6                MOV     A,@R0
+0079 9400              SUBB    A,#00H
+007B 18                DEC     R0
+007C E6                MOV     A,@R0
+007D 9400              SUBB    A,#00H
+007F 402C              JC      ?C0021
+                                           ; SOURCE LINE # 164
+0081 08                INC     R0
+0082 E6                MOV     A,@R0
+0083 16                DEC     @R0
+0084 18                DEC     R0
+0085 7023              JNZ     ?C0038
+0087 16                DEC     @R0
+0088         ?C0035:
+                                           ; SOURCE LINE # 165
+                                           ; SOURCE LINE # 166
+                                           ; SOURCE LINE # 167
+0088 8020              SJMP    ?C0038
+008A         ?C0018:
+008A 7800        R     MOV     R0,#LOW buckSolarRegMv
+008C E6                MOV     A,@R0
+008D FE                MOV     R6,A
+008E 08                INC     R0
+008F D3                SETB    C
+0090 120000      R     LCALL   L?0040
+0093 4018              JC      ?C0021
+0095 200015            JB      buckLimit2,?C0021
+                                           ; SOURCE LINE # 169
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 10  
+
+0098 7800        R     MOV     R0,#LOW buckCurVal+01H
+009A E6                MOV     A,@R0
+009B 94FF              SUBB    A,#0FFH
+009D 18                DEC     R0
+009E E6                MOV     A,@R0
+009F 9403              SUBB    A,#03H
+00A1 500A              JNC     ?C0021
+                                           ; SOURCE LINE # 170
+00A3 08                INC     R0
+00A4 06                INC     @R0
+00A5 E6                MOV     A,@R0
+00A6 18                DEC     R0
+00A7 7001              JNZ     ?C0036
+00A9 06                INC     @R0
+00AA         ?C0036:
+                                           ; SOURCE LINE # 171
+00AA         ?C0038:
+00AA 120000      R     LCALL   _BUCK_UpdatePwmOutput
+                                           ; SOURCE LINE # 172
+                                           ; SOURCE LINE # 173
+00AD         ?C0021:
+                                           ; SOURCE LINE # 177
+00AD 7800        R     MOV     R0,#LOW buckCurVal
+00AF E6                MOV     A,@R0
+00B0 FE                MOV     R6,A
+00B1 08                INC     R0
+00B2 E6                MOV     A,@R0
+00B3 7806              MOV     R0,#06H
+00B5         ?C0037:
+00B5 C3                CLR     C
+00B6 33                RLC     A
+00B7 CE                XCH     A,R6
+00B8 33                RLC     A
+00B9 CE                XCH     A,R6
+00BA D8F9              DJNZ    R0,?C0037
+00BC 7900        R     MOV     R1,#LOW solarMv+01H
+00BE F3                MOVX    @R1,A
+00BF EE                MOV     A,R6
+00C0 19                DEC     R1
+00C1 F3                MOVX    @R1,A
+                                           ; SOURCE LINE # 178
+00C2 300009            JNB     buckLimit1,?C0024
+00C5 7800        R     MOV     R0,#LOW solarMv
+00C7 E2                MOVX    A,@R0
+00C8 F2                MOVX    @R0,A
+00C9 08                INC     R0
+00CA E2                MOVX    A,@R0
+00CB 4401              ORL     A,#01H
+00CD F2                MOVX    @R0,A
+00CE         ?C0024:
+                                           ; SOURCE LINE # 179
+00CE 300009            JNB     buckLimit2,?C0025
+00D1 7800        R     MOV     R0,#LOW solarMv
+00D3 E2                MOVX    A,@R0
+00D4 F2                MOVX    @R0,A
+00D5 08                INC     R0
+00D6 E2                MOVX    A,@R0
+00D7 4402              ORL     A,#02H
+00D9 F2                MOVX    @R0,A
+00DA         ?C0025:
+                                           ; SOURCE LINE # 180
+00DA 7800        R     MOV     R0,#LOW solarMv
+00DC E2                MOVX    A,@R0
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 11  
+
+00DD FE                MOV     R6,A
+00DE 08                INC     R0
+00DF E2                MOVX    A,@R0
+00E0 FF                MOV     R7,A
+00E1 120000      E     LCALL   _SMB_SetBuckStatus
+                                           ; SOURCE LINE # 181
+                                           ; SOURCE LINE # 182
+00E4         ?C0026:
+00E4 22                RET     
+             ; FUNCTION BUCK_Update (END)
+
+             ; FUNCTION _BUCK_GetEfficiency (BEGIN)
+                                           ; SOURCE LINE # 185
+;---- Variable 'ps' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 186
+                                           ; SOURCE LINE # 187
+;---- Variable 'i' assigned to Register 'R5' ----
+0000 E4                CLR     A
+0001 FD                MOV     R5,A
+0002         ?C0027:
+                                           ; SOURCE LINE # 191
+0002 ED                MOV     A,R5
+0003 C3                CLR     C
+0004 9415              SUBB    A,#015H
+0006 7480              MOV     A,#080H
+0008 9480              SUBB    A,#080H
+000A 5019              JNC     ?C0028
+                                           ; SOURCE LINE # 192
+000C ED                MOV     A,R5
+000D 25E0              ADD     A,ACC
+000F 2400        R     ADD     A,#LOW buckEffPowerPoints
+0011 F582              MOV     DPL,A
+0013 E4                CLR     A
+0014 3400        R     ADDC    A,#HIGH buckEffPowerPoints
+0016 F583              MOV     DPH,A
+0018 D3                SETB    C
+0019 7401              MOV     A,#01H
+001B 93                MOVC    A,@A+DPTR
+001C 9F                SUBB    A,R7
+001D E4                CLR     A
+001E 93                MOVC    A,@A+DPTR
+001F 9E                SUBB    A,R6
+0020 5003              JNC     ?C0028
+                                           ; SOURCE LINE # 193
+                                           ; SOURCE LINE # 194
+                                           ; SOURCE LINE # 195
+0022 0D                INC     R5
+                                           ; SOURCE LINE # 196
+0023 80DD              SJMP    ?C0027
+0025         ?C0028:
+                                           ; SOURCE LINE # 198
+0025 ED                MOV     A,R5
+0026 900000      R     MOV     DPTR,#buckEffValues
+0029 93                MOVC    A,@A+DPTR
+002A FF                MOV     R7,A
+                                           ; SOURCE LINE # 199
+002B 22                RET     
+             ; FUNCTION _BUCK_GetEfficiency (END)
+
+             ; FUNCTION _BUCK_UpdatePwmOutput (BEGIN)
+                                           ; SOURCE LINE # 210
+                                           ; SOURCE LINE # 211
+                                           ; SOURCE LINE # 214
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 12  
+
+0000 C3                CLR     C
+0001 74FF              MOV     A,#0FFH
+0003 7800        R     MOV     R0,#LOW buckCurVal+01H
+0005 96                SUBB    A,@R0
+0006 FF                MOV     R7,A
+0007 7403              MOV     A,#03H
+0009 18                DEC     R0
+000A 96                SUBB    A,@R0
+000B FE                MOV     R6,A
+;---- Variable 'pwmVal' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 217
+000C EF                MOV     A,R7
+000D F5FB              MOV     PCA0CPL0,A
+                                           ; SOURCE LINE # 218
+000F EE                MOV     A,R6
+0010 F5FC              MOV     PCA0CPH0,A
+                                           ; SOURCE LINE # 221
+0012 08                INC     R0
+0013 E6                MOV     A,@R0
+0014 18                DEC     R0
+0015 46                ORL     A,@R0
+0016 7004              JNZ     ?C0031
+                                           ; SOURCE LINE # 222
+0018 53DABF            ANL     PCA0CPM0,#0BFH
+                                           ; SOURCE LINE # 223
+001B 22                RET     
+001C         ?C0031:
+                                           ; SOURCE LINE # 224
+001C E5DA              MOV     A,PCA0CPM0
+001E 5440              ANL     A,#040H
+0020 7003              JNZ     ?C0034
+                                           ; SOURCE LINE # 225
+0022 43DA40            ORL     PCA0CPM0,#040H
+                                           ; SOURCE LINE # 226
+                                           ; SOURCE LINE # 227
+                                           ; SOURCE LINE # 228
+0025         ?C0034:
+0025 22                RET     
+             ; FUNCTION _BUCK_UpdatePwmOutput (END)
+
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 13  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+SPI0CKR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A2H  1
+uint16_t . . . . . . . . . . . . . . .  TYPEDEF  -----  U_INT    -----  2
+P0 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0080H  1
+PSW_OV . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D2H  1
+XOSC0CN. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B1H  1
+P1 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0090H  1
+_SMB_SetBuckStatus . . . . . . . . . .  EXTERN   CODE   PROC     -----  -----
+P2 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A0H  1
+uint64_t . . . . . . . . . . . . . . .  TYPEDEF  -----  ARRAY    -----  8
+ADC0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0097H  1
+SI_GEN_PTR_t . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  3
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  3
+  gptr . . . . . . . . . . . . . . . .  MEMBER   -----  STRUCT   0000H  3
+SMB0CN0_MASTER . . . . . . . . . . . .  ABSBIT   -----  BIT      00C7H  1
+PCA0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00F9H  2
+RTC0KEY. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AEH  1
+EIE1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E6H  1
+SMB0CN0_ACK. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C1H  1
+EIE2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E7H  1
+int32_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  LONG     -----  4
+PSCTL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008FH  1
+IT01CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E4H  1
+CS0CN0 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B0H  1
+int16_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  INT      -----  2
+SMB0CN0_TXMODE . . . . . . . . . . . .  ABSBIT   -----  BIT      00C6H  1
+DERIVID. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E3H  1
+CS0MD1 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AFH  1
+SFRPAGE. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A7H  1
+CS0MD2 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F3H  1
+P0MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A4H  1
+CS0MD3 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F3H  1
+int64_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  ARRAY    -----  8
+P1MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A5H  1
+SI_UU32. . . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  4
+  u32. . . . . . . . . . . . . . . . .  MEMBER   -----  U_LONG   0000H  4
+  s32. . . . . . . . . . . . . . . . .  MEMBER   -----  LONG     0000H  4
+  uu16 . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+ADC0CN0_ADINT. . . . . . . . . . . . .  ABSBIT   -----  BIT      00EDH  1
+TMR2RLH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CBH  1
+P2MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A6H  1
+IE . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A8H  1
+false. . . . . . . . . . . . . . . . .  E_CONST  -----  U_CHAR   -----  1
+TMR3RLH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0093H  1
+SI_UU16. . . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  2
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  U_INT    0000H  2
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  INT      0000H  2
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+EIP1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F6H  1
+BUCK_EnableRegulate. . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  en . . . . . . . . . . . . . . . . .  AUTO     DATA   BIT      0000H  1
+  t. . . . . . . . . . . . . . . . . .  AUTO     PDATA  U_LONG   0000H  4
+_BUCK_SetSolarVoltage. . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  v. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 14  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+buckSolarRegMv . . . . . . . . . . . .  PUBLIC   IDATA  U_INT    0000H  2
+EIP2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F7H  1
+SCON0_RB8. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009AH  1
+TMR2RLL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CAH  1
+PCA0CPH0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FCH  1
+TMR3RLL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0092H  1
+PCA0CPH1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EAH  1
+GPTR_t . . . . . . . . . . . . . . . .  TYPEDEF  -----  STRUCT   -----  3
+  memtype. . . . . . . . . . . . . . .  MEMBER   -----  U_CHAR   0000H  1
+  address. . . . . . . . . . . . . . .  MEMBER   -----  UNION    0001H  2
+SCON0_TB8. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009BH  1
+CS0CN0_CSEN. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B7H  1
+B_B0 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F0H  1
+DP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0082H  2
+PCA0CPH2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ECH  1
+B_B1 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F1H  1
+ADC0GT . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00C3H  2
+B_B2 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F2H  1
+PCA0CPL0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FBH  1
+B_B3 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F3H  1
+PCA0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D9H  1
+PCA0CPM0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DAH  1
+PCA0CPL1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E9H  1
+B_B4 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F4H  1
+PCA0CPM1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DBH  1
+PCA0CPL2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EBH  1
+B_B5 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F5H  1
+PCA0CPM2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DCH  1
+IP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B8H  1
+ADC0TK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BCH  1
+_BUCK_UpdatePwmOutput. . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  pwmVal . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+_BUCK_SetBattVoltage . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  v. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+buckBattRegMv. . . . . . . . . . . . .  PUBLIC   IDATA  U_INT    0002H  2
+B_B6 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F6H  1
+ADC0LT . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00C5H  2
+IREF0CN0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D6H  1
+SCON0_MCE. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009DH  1
+B_B7 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F7H  1
+BUCK_Init. . . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+XBR0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E1H  1
+SMB0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C1H  1
+XBR1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E2H  1
+CS0SCAN0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D2H  1
+SMB0CN0_STA. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C5H  1
+XBR2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E3H  1
+CS0SCAN1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D3H  1
+ADC0MX . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0096H  1
+ACC_ACC0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E0H  1
+REF0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D1H  1
+HFO0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B2H  1
+CKCON0 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008EH  1
+ACC_ACC1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E1H  1
+REG0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C9H  1
+CRC0IN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0085H  1
+TMR2CN0_TR2. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CAH  1
+ACC_ACC2 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E2H  1
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 15  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+ACC_ACC3 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E3H  1
+SP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0081H  1
+CMP0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009DH  1
+ACC_ACC4 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E4H  1
+_ADC_GetValueForIsr. . . . . . . . . .  EXTERN   CODE   PROC     -----  -----
+_BUCK_GetEfficiency. . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  ps . . . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+  i. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0005H  1
+PCA0CN0_CCF0 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D8H  1
+ACC_ACC5 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E5H  1
+PCA0CN0_CCF1 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D9H  1
+ACC_ACC6 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E6H  1
+TMR2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00CCH  2
+PCA0CN0_CCF2 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DAH  1
+ACC_ACC7 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E7H  1
+TMR3 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0094H  2
+CS0CN0_CSCMPF. . . . . . . . . . . . .  ABSBIT   -----  BIT      00B0H  1
+SMB0CN0_ACKRQ. . . . . . . . . . . . .  ABSBIT   -----  BIT      00C3H  1
+VDM0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FFH  1
+P0MDIN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F1H  1
+SCON0_REN. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009CH  1
+P1MDIN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F2H  1
+CS0THH . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FEH  1
+SMB0CN0_STO. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C4H  1
+PMU0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B5H  1
+P0MASK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C7H  1
+bool . . . . . . . . . . . . . . . . .  TYPEDEF  DATA   BIT      -----  1
+buckEffValues. . . . . . . . . . . . .  PUBLIC   CODE   ARRAY    002CH  22
+P1MASK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BFH  1
+SI_GEN_PTR . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  3
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  3
+  gptr . . . . . . . . . . . . . . . .  MEMBER   -----  STRUCT   0000H  3
+CS0THL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FDH  1
+PSW_RS0. . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D3H  1
+PCA0CN0_CF . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DFH  1
+SPI0CN0_RXOVRN . . . . . . . . . . . .  ABSBIT   -----  BIT      00FCH  1
+PSW_RS1. . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D4H  1
+PARAM_GetFloatMv . . . . . . . . . . .  EXTERN   CODE   PROC     -----  -----
+TMR2CN0_T2XCLK0. . . . . . . . . . . .  ABSBIT   -----  BIT      00C8H  1
+BUCK_EnableBatteryLimit. . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  en . . . . . . . . . . . . . . . . .  AUTO     DATA   BIT      0000H  1
+TMR2CN0_T2XCLK1. . . . . . . . . . . .  ABSBIT   -----  BIT      00C9H  1
+ADC0CN0_ADEN . . . . . . . . . . . . .  ABSBIT   -----  BIT      00EFH  1
+TMOD . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0089H  1
+TCON . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0088H  1
+PMU0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B5H  1
+PMU0FL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CEH  1
+CRC0FLIP . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009CH  1
+PSW_PARITY . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D0H  1
+IE_ES0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ACH  1
+CMP0MX . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009FH  1
+IE_ET0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A9H  1
+IE_ET1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ABH  1
+P0SKIP . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D4H  1
+IE_ET2 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ADH  1
+P1SKIP . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D5H  1
+ADC0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E8H  1
+IE_EX0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A8H  1
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 16  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+PCA0CN0_CR . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DEH  1
+IE_EX1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AAH  1
+SCON0_SMODE. . . . . . . . . . . . . .  ABSBIT   -----  BIT      009FH  1
+CLKSEL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A9H  1
+SPI0CN0_SPIEN. . . . . . . . . . . . .  ABSBIT   -----  BIT      00F8H  1
+B. . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F0H  1
+ADC0H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BEH  1
+true . . . . . . . . . . . . . . . . .  E_CONST  -----  U_CHAR   -----  1
+CRC0AUTO . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009EH  1
+CS0CN0_CSBUSY. . . . . . . . . . . . .  ABSBIT   -----  BIT      00B4H  1
+ADC0CN0_ADBMEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00EEH  1
+TMR2RL . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00CAH  2
+ADC0L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BDH  1
+TMR3RL . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0092H  2
+PCA0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D8H  1
+ACC. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E0H  1
+PCA0CP0. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00FBH  2
+PCA0CP1. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00E9H  2
+PCA0CP2. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00EBH  2
+CRC0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0084H  1
+TH0. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008CH  1
+buckEffPowerPoints . . . . . . . . . .  PUBLIC   CODE   ARRAY    0000H  44
+IP_PS0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BCH  1
+TH1. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008DH  1
+PCA0H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FAH  1
+IP_PT0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B9H  1
+IP_PT1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BBH  1
+uint8_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  U_CHAR   -----  1
+SMB0CN0_ARBLOST. . . . . . . . . . . .  ABSBIT   -----  BIT      00C2H  1
+IP_PT2 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BDH  1
+TL0. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008AH  1
+CS0CF. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AAH  1
+SPI0CN0_TXBMT. . . . . . . . . . . . .  ABSBIT   -----  BIT      00F9H  1
+PSW_F0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D5H  1
+IE_ESPI0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AEH  1
+TL1. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008BH  1
+PCA0L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F9H  1
+SMB0CN0_SI . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C0H  1
+PSW_F1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D1H  1
+P0_B0. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0080H  1
+IP_PX0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B8H  1
+P1_B0. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0090H  1
+P0_B1. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0081H  1
+IP_PX1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BAH  1
+CS0DH. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EEH  1
+CMP0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009BH  1
+TCON_IE0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0089H  1
+P1_B1. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0091H  1
+P0_B2. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0082H  1
+TCON_IE1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008BH  1
+P1_B2. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0092H  1
+P0_B3. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0083H  1
+SMB0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C0H  1
+P1_B3. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0093H  1
+P0_B4. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0084H  1
+P1_B4. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0094H  1
+P0_B5. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0085H  1
+CS0DL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EDH  1
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 17  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+P1_B5. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0095H  1
+P0_B6. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0086H  1
+P1_B6. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0096H  1
+P0_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0087H  1
+int8_t . . . . . . . . . . . . . . . .  TYPEDEF  -----  CHAR     -----  1
+P1_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0097H  1
+buckLimit1 . . . . . . . . . . . . . .  PUBLIC   DATA   BIT      0000H  1
+P2_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A7H  1
+buckLimit2 . . . . . . . . . . . . . .  PUBLIC   DATA   BIT      0001H  1
+DPH. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0083H  1
+ADC0GTH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C4H  1
+TMR2CN0_TF2H . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CFH  1
+TMR2CN0_T2SPLIT. . . . . . . . . . . .  ABSBIT   -----  BIT      00CBH  1
+PSW_AC . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D6H  1
+SPI0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F8H  1
+HFO0CAL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B3H  1
+CS0SE. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DEH  1
+TCON_TF0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008DH  1
+SCON0_RI . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0098H  1
+DPL. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0082H  1
+TCON_TF1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008FH  1
+SBUF0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0099H  1
+PCON0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0087H  1
+IREF0CF. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B9H  1
+ADC0GTL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C3H  1
+SI_UU32_t. . . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  4
+  u32. . . . . . . . . . . . . . . . .  MEMBER   -----  U_LONG   0000H  4
+  s32. . . . . . . . . . . . . . . . .  MEMBER   -----  LONG     0000H  4
+  uu16 . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+TMR2CN0_TF2L . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CEH  1
+SCON0_TI . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0099H  1
+ADC0CN0_ADCM0. . . . . . . . . . . . .  ABSBIT   -----  BIT      00E8H  1
+ADC0LTH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C6H  1
+TCON_IT0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0088H  1
+CS0CN0_CSPME . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B1H  1
+ADC0CN0_ADCM1. . . . . . . . . . . . .  ABSBIT   -----  BIT      00E9H  1
+RSTSRC . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EFH  1
+P0MAT. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D7H  1
+CRC0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0086H  1
+SI_UU16_t. . . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  2
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  U_INT    0000H  2
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  INT      0000H  2
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+TCON_IT1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008AH  1
+ADC0CN0_ADCM2. . . . . . . . . . . . .  ABSBIT   -----  BIT      00EAH  1
+SCON0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0098H  1
+P1MAT. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CFH  1
+CS0PM. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DEH  1
+ADC0CN0_ADWINT . . . . . . . . . . . .  ABSBIT   -----  BIT      00EBH  1
+ADC0CN0_ADBUSY . . . . . . . . . . . .  ABSBIT   -----  BIT      00ECH  1
+SMB0ADM. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F5H  1
+ADC0LTL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C5H  1
+SPI0CN0_MODF . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FDH  1
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 18  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+IP_PSPI0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BEH  1
+CS0CN0_CSEOS . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B6H  1
+TMR2CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C8H  1
+TMR3CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0091H  1
+SMB0ADR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F4H  1
+TCON_TR0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008CH  1
+CS0CN0_CSINT . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B5H  1
+CS0MX. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ABH  1
+BUCK_Update. . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  solarMv. . . . . . . . . . . . . . .  AUTO     PDATA  U_INT    0000H  2
+  battMv . . . . . . . . . . . . . . .  AUTO     PDATA  U_INT    0002H  2
+  solarMa. . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+TMR2CN0_TF2CEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00CCH  1
+TCON_TR1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008EH  1
+SMB0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C2H  1
+P0DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0099H  1
+CS0SS. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DDH  1
+AUX. . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0080H  1
+TMR2H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CDH  1
+SPI0CFG. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A1H  1
+P1DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009BH  1
+TMR3H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0095H  1
+P2DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009DH  1
+CRC0CNT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009AH  1
+buckEnable . . . . . . . . . . . . . .  PUBLIC   DATA   BIT      0002H  1
+TMR2L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CCH  1
+RTC0ADR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ACH  1
+SPI0CN0_SPIF . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FFH  1
+TMR3L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0094H  1
+ADC0PWR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BBH  1
+IE_EA. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AFH  1
+RTC0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ADH  1
+buckLimitEnable. . . . . . . . . . . .  PUBLIC   DATA   BIT      0003H  1
+CS0CN0_CSCMPEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00B3H  1
+FLSCL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B6H  1
+TMR2CN0_TF2LEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00CDH  1
+SPI0CN0_WCOL . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FEH  1
+SPI0CN0_NSSMD0 . . . . . . . . . . . .  ABSBIT   -----  BIT      00FAH  1
+PSW_CY . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D7H  1
+SPI0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A3H  1
+buckCurVal . . . . . . . . . . . . . .  PUBLIC   IDATA  U_INT    0004H  2
+SPI0CN0_NSSMD1 . . . . . . . . . . . .  ABSBIT   -----  BIT      00FBH  1
+ADC0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00BDH  2
+TOFFH. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008EH  1
+PSW. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D0H  1
+PCA0PWM. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DFH  1
+REVID. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E2H  1
+TOFFL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008DH  1
+FLKEY. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B7H  1
+uint32_t . . . . . . . . . . . . . . .  TYPEDEF  -----  U_LONG   -----  4
+ADC0AC . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BAH  1
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =    495    ----
+   CONSTANT SIZE    =     66    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----       8
+   DATA SIZE        =   ----    ----
+C51 COMPILER V9.60.0.0   BUCK                                                              02/10/2023 13:46:29 PAGE 19  
+
+   IDATA SIZE       =      6    ----
+   BIT SIZE         =      4       2
+   EDATA SIZE       =   ----    ----
+   HDATA SIZE       =   ----    ----
+   XDATA CONST SIZE =   ----    ----
+   FAR CONST SIZE   =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

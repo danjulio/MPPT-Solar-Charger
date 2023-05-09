@@ -1,0 +1,2508 @@
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 1   
+
+
+C51 COMPILER V9.60.0.0, COMPILATION OF MODULE CHARGE
+OBJECT MODULE PLACED IN .\src/charge.OBJ
+COMPILER INVOKED BY: Z:\Applications\Simplicity Studio.app\Contents\Eclipse\developer\toolchains\keil_8051\9.60\BIN\C51.
+                    -exe /Users/danjulio/SimplicityStudio/v4_workspace/SolarMpptCharger/src/charge.c OMF2 COMPACT DEBUG OBJECTEXTEND ROM(LARG
+                    -E) WARNINGLEVEL(2) FLOATFUZZY(3) OPTIMIZE(9,SPEED) DEFINE(NDEBUG=1) INTVECTOR(0X0000) INTPROMOTE INCDIR(/Users/danjulio/
+                    -SimplicityStudio/v4_workspace/SolarMpptCharger/inc;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/8
+                    -051/v4.1.7//Device/shared/si8051Base;/Applications/Simplicity Studio.app/Contents/Eclipse/developer/sdks/8051/v4.1.7//De
+                    -vice/EFM8SB1/inc) REGFILE(SolarMpptCharger.ORC) PRINT(.\src/charge.lst) COND SYMBOLS CODE PAGEWIDTH(120) PAGELENGTH(65) 
+                    -OBJECT(.\src/charge.OBJ)
+
+line level    source
+
+   1          /*
+   2           * charge.c
+   3           *
+   4           * Charge control logic:
+   5           *   1. Implement MPPT control
+   6           *     - Occasional MPPT Scan from near battery voltage to solar panel voltage to find current Vmpp
+   7           *     - MPPT P&O algorithm with dynamic step size and partially shaded panel recovery capabilities
+   8           *   2. Implement Charge control
+   9           *     - Night/Day detection
+  10           *     - Charge state management: BULK, ABSORPTION, FLOAT
+  11           *     - Temperature compensation and over/under-temperature charge suspension management
+  12           *     - Bulk/Absorption over-charge timer
+  13           *     - Battery disconnect handling
+  14           *     - Update SMBus registers with charge related values
+  15           *
+  16           * Copyright (c) 2018-2023 danjuliodesigns, LLC.  All rights reserved.
+  17           *
+  18           * SolarMpptCharger is free software: you can redistribute it and/or modify it
+  19           * under the terms of the GNU Lesser General Public License as published
+  20           * by the Free Software Foundation, either version 3 of the License, or
+  21           * (at your option) any later version.
+  22           *
+  23           * SolarMpptCharger is distributed in the hope that it will be useful,
+  24           * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  25           * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  26           * GNU Lesser General Public License for more details.
+  27           *
+  28           * See <http://www.gnu.org/licenses/>.
+  29           *
+  30           */
+  31          #include "charge.h"
+  32          #include "adc.h"
+  33          #include "buck.h"
+  34          #include "config.h"
+  35          #include "param.h"
+  36          #include "power.h"
+  37          #include "smbus.h"
+  38          #include "temp.h"
+  39          
+  40          
+  41          //-----------------------------------------------------------------------------
+  42          // Variables
+  43          //-----------------------------------------------------------------------------
+  44          
+  45          //
+  46          // Charge Management variables
+  47          //
+  48          bool chargeMpptEnable;
+  49          bool chargeMpptScanEnable;
+  50          bool chargeTempLimited;
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 2   
+
+  51          uint8_t chargeState;
+  52          uint8_t chargeLowProdCount;
+  53          uint8_t chargeAbsTermCount;
+  54          uint16_t chargeSolarRegMv;
+  55          uint16_t chargeMpptStepMv;
+  56          uint16_t chargeHighCount;
+  57          uint16_t chargeTimeoutCount;
+  58          uint16_t chargeCompThreshMv;
+  59          uint16_t chargeScanEndMv;
+  60          uint16_t chargeMaxPower;
+  61          uint16_t chargeMaxScanVSetpoint;
+  62          
+  63          //
+  64          // Current measurement values
+  65          //
+  66          uint16_t v_s_mv;
+  67          uint16_t i_s_ma;
+  68          uint16_t v_b_mv;
+  69          uint16_t i_b_ma;
+  70          int16_t i_c_ma;        // Battery charge current estimate
+  71          uint16_t solarPowerMw;
+  72          
+  73          //
+  74          // Code-optimizing temporary used by _CHARGE_ComputePower and _CHARGE_ComputeChargeCurrent
+  75          //
+  76          uint32_t solarPowerUw;
+  77          
+  78          
+  79          
+  80          //-----------------------------------------------------------------------------
+  81          // Internal Routine forward declarations
+  82          //-----------------------------------------------------------------------------
+  83          void _CHARGE_SetState(uint8_t newSt);
+  84          uint16_t _CHARGE_ComputePower();
+  85          int16_t _CHARGE_ComputeChargeCurrent();
+  86          void _CHARGE_IncMpptRegVoltage();
+  87          void _CHARGE_DecMpptRegVoltage();
+  88          void _CHARGE_SetRegulate(bool en);
+  89          void _CHARGE_AdjustCompBattV();
+  90          void _CHARGE_StartScan(uint16_t lowMv, uint16_t highMv);
+  91          
+  92          
+  93          //-----------------------------------------------------------------------------
+  94          // API Routines
+  95          //-----------------------------------------------------------------------------
+  96          void CHARGE_Init() {
+  97   1              chargeMpptEnable = false;
+  98   1              chargeMpptScanEnable = false;
+  99   1              chargeTempLimited = false;
+ 100   1              chargeSolarRegMv = V_MIN_GOOD_SOLAR;
+ 101   1              chargeMpptStepMv = MPPT_LO_I_STEP_MV;
+ 102   1              chargeLowProdCount = 0;
+ 103   1              chargeAbsTermCount = 0;
+ 104   1              chargeHighCount = 0;
+ 105   1              chargeTimeoutCount = 0;
+ 106   1              chargeCompThreshMv = PARAM_GetFloatMv();
+ 107   1      
+ 108   1              // Select entry state based on initial solar voltage
+ 109   1              if (((uint16_t) ADC_GetValue(ADC_MEAS_VS_INDEX)) < (V_NIGHT_THRESH + V_DELTA_CHANGE)) {
+ 110   2                      chargeState = CHG_ST_NIGHT;
+ 111   2              } else {
+ 112   2                      chargeState = CHG_ST_IDLE;
+ 113   2              }
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 3   
+
+ 114   1      }
+ 115          
+ 116          
+ 117          // CHARGE_MpptUpdate should be called prior to CHARGE_StateUpdate
+ 118          void CHARGE_MpptUpdate() {
+ 119   1              static uint16_t lastPowerMw = 0;
+ 120   1              static uint16_t lastSolarMv= 0;
+ 121   1              bool deltaVpos;
+ 122   1      
+ 123   1              // Update current operating measurement values for use during this evaluation
+ 124   1              v_s_mv = (uint16_t) ADC_GetValue(ADC_MEAS_VS_INDEX);
+ 125   1              i_s_ma = (uint16_t) ADC_GetValue(ADC_MEAS_IS_INDEX);
+ 126   1              v_b_mv = (uint16_t) ADC_GetValue(ADC_MEAS_VB_INDEX);
+ 127   1              i_b_ma = (uint16_t) ADC_GetValue(ADC_MEAS_IB_INDEX);
+ 128   1              solarPowerMw = _CHARGE_ComputePower();  // Call before _CHARGE_ComputeChargeCurrent
+ 129   1              i_c_ma = _CHARGE_ComputeChargeCurrent();
+ 130   1      
+ 131   1              // Execute MPPT Scan algorithm if enabled
+ 132   1              if (chargeMpptScanEnable) {
+ 133   2                      // Update maxima
+ 134   2                      if (solarPowerMw > chargeMaxPower) {
+ 135   3                              chargeMaxPower = solarPowerMw;
+ 136   3                              chargeMaxScanVSetpoint = v_s_mv;
+ 137   3                      }
+ 138   2      
+ 139   2                      // Update for next evaluation
+ 140   2                      chargeSolarRegMv -= MPPT_SCAN_STEP_MV;
+ 141   2                      BUCK_SetSolarVoltage(chargeSolarRegMv);
+ 142   2      
+ 143   2                      // Check for completion
+ 144   2                      if (chargeSolarRegMv < chargeScanEndMv) {
+ 145   3                              chargeMpptScanEnable = false;
+ 146   3                      }
+ 147   2              }
+ 148   1      
+ 149   1              // Execute MPPT PO algorithm if enabled and regulator isn't limiting (since
+ 150   1              // it would cause calculations to be incorrect)
+ 151   1              else if (chargeMpptEnable) {
+ 152   2                      if (BUCK_IsLimiting()) {
+ 153   3                              // Let chargeSolarRegMv follow the solar panel output as a starting
+ 154   3                              // point for when the algorithm starts executing again
+ 155   3                              chargeSolarRegMv = v_s_mv;
+ 156   3                      } else {
+ 157   3                              // Compute current step voltage
+ 158   3                              if (i_s_ma > MPPT_HI_I_STEP_MA) {
+ 159   4                                      chargeMpptStepMv = MPPT_HI_I_STEP_MV;
+ 160   4                              } else if (i_s_ma > MPPT_LO_I_STEP_MA) {
+ 161   4                                      chargeMpptStepMv = MPPT_MID_I_STEP_MV;
+ 162   4                              } else {
+ 163   4                                      chargeMpptStepMv = MPPT_LO_I_STEP_MV;
+ 164   4                              }
+ 165   3      
+ 166   3                              // Look for special case where MPPT algorithm has wandered upward causing the BUCK
+ 167   3                              // to stop operating.  This seems to happen when a panel is partially obscured and
+ 168   3                              // the light level changes rapidly.  Force a condition that decreases the regulation
+ 169   3                              // voltage until the BUCK restarts.
+ 170   3                              if ((chargeSolarRegMv >= V_MAX_SOLARV) && (BUCK_GetPwm() == 0)) {
+ 171   4                                      chargeSolarRegMv = v_s_mv - chargeMpptStepMv;
+ 172   4                                      if (chargeSolarRegMv < V_MIN_SOLARV) chargeSolarRegMv = V_MIN_SOLARV;
+ 173   4                              } else {
+ 174   4                                      // Compute sign of deltaV
+ 175   4                                      deltaVpos = v_s_mv >= lastSolarMv;
+ 176   4      
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 4   
+
+ 177   4                                      // Evaluate Perturb and Observe Algorithm
+ 178   4                                      if (solarPowerMw > lastPowerMw) {
+ 179   5                                              // [Ideally] Climbing the curve toward MPP
+ 180   5                                              //   - solar V delta pos -> solar voltage increased and power increased so more
+ 181   5                                              //     power must be at higher voltage
+ 182   5                                              //   - solar V delta neg -> solar voltage decreased and power increased so more
+ 183   5                                              //     power must be at lower voltage
+ 184   5                                              if (deltaVpos) {
+ 185   6                                                      _CHARGE_IncMpptRegVoltage();
+ 186   6                                              } else {
+ 187   6                                                      _CHARGE_DecMpptRegVoltage();
+ 188   6                                              }
+ 189   5                                      } else {
+ 190   5                                              // [Ideally] Descending the curve past MPP
+ 191   5                                              //   - solar V delta pos -> solar voltage increased but power went down so more
+ 192   5                                              //     power must be at lower voltage
+ 193   5                                              //   - solar V delta neg -> solar voltage decreased but power went down so more
+ 194   5                                              //     power must be at higher voltage
+ 195   5                                              if (deltaVpos) {
+ 196   6                                                      _CHARGE_DecMpptRegVoltage();
+ 197   6                                              } else {
+ 198   6                                                      _CHARGE_IncMpptRegVoltage();
+ 199   6                                              }
+ 200   5                                      }
+ 201   4                              }
+ 202   3      
+ 203   3                              // Update BUCK regulation voltage
+ 204   3                              BUCK_SetSolarVoltage(chargeSolarRegMv);
+ 205   3                      }
+ 206   2              }
+ 207   1      
+ 208   1              // Store previous values
+ 209   1              lastPowerMw = solarPowerMw;
+ 210   1              lastSolarMv = v_s_mv;
+ 211   1      
+ 212   1              // Update SMBus registers
+ 213   1              SMB_SetIndexedValue(SMB_INDEX_VS, v_s_mv);
+ 214   1              SMB_SetIndexedValue(SMB_INDEX_IS, i_s_ma);
+ 215   1              SMB_SetIndexedValue(SMB_INDEX_VB, v_b_mv);
+ 216   1              SMB_SetIndexedValue(SMB_INDEX_IB, i_b_ma);
+ 217   1              SMB_SetIndexedValue(SMB_INDEX_IC, i_c_ma);
+ 218   1              SMB_SetIndexedValue(SMB_INDEX_VM, chargeSolarRegMv);
+ 219   1      }
+ 220          
+ 221          
+ 222          void CHARGE_StateUpdate() {
+ 223   1              bool b;
+ 224   1              static uint8_t scanExitChargeState;  // Used to restore state after MPPT scan
+ 225   1              int16_t t_c10;
+ 226   1      
+ 227   1              // Evaluate specific charge-state items
+ 228   1              if ((chargeState == CHG_ST_BULK) || (chargeState == CHG_ST_ABS)) {
+ 229   2                      // Set temperature compensated charge voltage for bulk/abs
+ 230   2                      chargeCompThreshMv = TEMP_GetCompBulkMv();
+ 231   2      
+ 232   2                      // Evaluate Bulk/Absorption over-charge timer
+ 233   2                      if (v_b_mv > (TEMP_GetCompFloatMv() + V_DELTA_CHANGE)) {
+ 234   3                              if (++chargeHighCount >= HIGH_CHARGE_TIMEOUT) {
+ 235   4                                      _CHARGE_SetState(CHG_ST_FLT);
+ 236   4                              }
+ 237   3                      } else {
+ 238   3                              chargeHighCount = 0;
+ 239   3                      }
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 5   
+
+ 240   2              } else {
+ 241   2                      // Set temperature compensated charge voltage for float (default)
+ 242   2                      chargeCompThreshMv = TEMP_GetCompFloatMv();
+ 243   2              }
+ 244   1      
+ 245   1              // Evaluate temperature limits
+ 246   1              t_c10 = TEMP_GetCurTempC10();
+ 247   1              if (chargeTempLimited) {
+ 248   2                      // Look for temperature to return to within charging limits
+ 249   2                      b = t_c10 > (PARAM_GetBattIsLeadAcid() ? (TEMP_LIMIT_LOW_1 + TEMP_LIMIT_HYST)*10 : (TEMP_LIMIT_LOW_2 + T
+             -EMP_LIMIT_HYST)*10);
+ 250   2                      if ((t_c10 < ((TEMP_LIMIT_HIGH - TEMP_LIMIT_HYST)*10)) && b) {
+ 251   3                              chargeTempLimited = false;
+ 252   3                      }
+ 253   2              } else {
+ 254   2                      // Look for temperature outside of charging limits
+ 255   2                      b =  t_c10 < (PARAM_GetBattIsLeadAcid() ? TEMP_LIMIT_LOW_1*10 : TEMP_LIMIT_LOW_2*10);
+ 256   2                      if ((t_c10 > (TEMP_LIMIT_HIGH*10)) || b) {
+ 257   3                              chargeTempLimited = true;
+ 258   3                              if (!((chargeState == CHG_ST_NIGHT) || (chargeState == CHG_ST_IDLE))) {
+ 259   4                                      _CHARGE_SetState(CHG_ST_IDLE);
+ 260   4                              }
+ 261   3                      }
+ 262   2              }
+ 263   1      
+ 264   1              // Evaluate various exits (in priority order) from one charge state to another state
+ 265   1              if ((chargeState == CHG_ST_BULK) || (chargeState == CHG_ST_ABS) || (chargeState == CHG_ST_FLT)) {
+ 266   2                      // Immediately transition to CHG_ST_IDLE for a disconnected battery which will switch off the buck to
+ 267   2                      // kill power to the system (which may not be able to be regulated anymore depending on the load).
+ 268   2                      if (v_b_mv < V_BAD_BATTERY) {
+ 269   3                              _CHARGE_SetState(CHG_ST_IDLE);
+ 270   3                      }
+ 271   2      
+ 272   2                      // Evaluate periodic scan timer
+ 273   2                      else if (++chargeTimeoutCount == MPPT_SCAN_TIMEOUT) {
+ 274   3                              // Entering scan isn't necessary if we are limiting since we're already getting enough
+ 275   3                              // power.  Plus we don't want to create a condition where the converter supplies so
+ 276   3                              // much power during the scan that the battery voltage rises significantly above
+ 277   3                              // the current charge threshold.
+ 278   3                              if (!BUCK_IsLimiting()) {
+ 279   4                                      scanExitChargeState = chargeState;    // Save current state to restore after scan
+ 280   4                                      _CHARGE_SetState(CHG_ST_VSRCV);       // Turn off charging and start a short idle period to let VS rec
+             -over to OC voltage
+ 281   4                              } else {
+ 282   4                                      // Restart the timer
+ 283   4                                      chargeTimeoutCount = 0;
+ 284   4                              }
+ 285   3                      }
+ 286   2      
+ 287   2                      // Detect low power production after an interval qualified by making sure the buck
+ 288   2                      // converter isn't limiting due to a charged battery (and therefore consuming no power).
+ 289   2                      // The interval allows us to weather short declines in solar voltage (e.g. passing
+ 290   2                      // clouds) without unnecessarily going back through idle.
+ 291   2                      else if ((solarPowerMw < P_MIN_THRESH) && !BUCK_IsLimiting()) {
+ 292   3                              if (++chargeLowProdCount >= LOW_PROD_TIMEOUT) {
+ 293   4                                      _CHARGE_SetState(CHG_ST_IDLE);
+ 294   4                              }
+ 295   3                      } else {
+ 296   3                              // Reset low solar production timer
+ 297   3                              chargeLowProdCount = 0;
+ 298   3                      }
+ 299   2              }
+ 300   1      
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 6   
+
+ 301   1              // Evaluate charge state machine
+ 302   1              switch (chargeState) {
+ 303   2              case CHG_ST_NIGHT:
+ 304   2                      if (v_s_mv > (V_NIGHT_THRESH + V_DELTA_CHANGE)) {
+ 305   3                              // Light above night threshold.  Evaluate transition to IDLE based on PCTRL input:
+ 306   3                              //   1. PCTRL set (power only at night): Wait WAKE_TIMEOUT to prevent temporary panel illumination
+ 307   3                              //      from turning off power.
+ 308   3                              //   2. PCTRL clear (power always): Can move to IDLE immediately
+ 309   3                              if (!POWER_PctrlSet() || (++chargeTimeoutCount == WAKE_TIMEOUT)) {
+ 310   4                                      _CHARGE_SetState(CHG_ST_IDLE);
+ 311   4                              }
+ 312   3                      } else {
+ 313   3                              // Hold timer in reset while voltage below night threshold
+ 314   3                              chargeTimeoutCount = 0;
+ 315   3                      }
+ 316   2                      break;
+ 317   2      
+ 318   2              case CHG_ST_IDLE:
+ 319   2                      if (v_s_mv < (V_NIGHT_THRESH - V_DELTA_CHANGE)) {
+ 320   3                              if (++chargeTimeoutCount == NIGHT_TIMEOUT) {
+ 321   4                                      _CHARGE_SetState(CHG_ST_NIGHT);
+ 322   4                              }
+ 323   3                      } else {
+ 324   3                              chargeTimeoutCount = 0; // Reset night detection
+ 325   3      
+ 326   3                              // See if we can enter a charging state
+ 327   3                              if ((v_s_mv > V_MIN_GOOD_SOLAR) && (v_b_mv >= V_BAD_BATTERY) && !chargeTempLimited) {
+ 328   4                                      _CHARGE_SetState(CHG_ST_SCAN);
+ 329   4                                      b = v_b_mv < (PARAM_GetBattIsLeadAcid() ? V_MIN_IDLE_2_FLT_1 : V_MIN_IDLE_2_FLT_2);
+ 330   4                                      if (b) {
+ 331   5                                              scanExitChargeState = CHG_ST_BULK;
+ 332   5                                      } else {
+ 333   5                                              scanExitChargeState = CHG_ST_FLT;
+ 334   5                                      }
+ 335   4                              }
+ 336   3                      }
+ 337   2                      break;
+ 338   2      
+ 339   2          case CHG_ST_VSRCV: // Allow VS to recover after charging before starting a scan
+ 340   2              if (++chargeTimeoutCount == CHG_RCVR_PERIOD) {
+ 341   3                      _CHARGE_SetState(CHG_ST_SCAN);
+ 342   3              }
+ 343   2              break;
+ 344   2      
+ 345   2          case CHG_ST_SCAN:
+ 346   2              if (!chargeMpptScanEnable) {
+ 347   3                      // Scan done, restart charging
+ 348   3                      BUCK_EnableRegulate(false);                   // Disable BUCK to force re-initialization at start
+             - of charge
+ 349   3                      chargeSolarRegMv = chargeMaxScanVSetpoint;    // Set voltage for maximum power
+ 350   3                      if (scanExitChargeState != CHG_ST_FLT) {
+ 351   4                              // During scan, the compensation logic reset the threshold voltage to FLOAT
+ 352   4                              // so we reset it here to BULK/ABSORPTION if necessary
+ 353   4                              chargeCompThreshMv = TEMP_GetCompBulkMv();
+ 354   4                      }
+ 355   3                      _CHARGE_SetState(scanExitChargeState);
+ 356   3              }
+ 357   2              break;
+ 358   2      
+ 359   2              case CHG_ST_BULK:
+ 360   2                      _CHARGE_AdjustCompBattV();
+ 361   2      
+ 362   2                      // Look for termination condition - move to Absorption charge when battery voltage rises to Bulk limit
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 7   
+
+ 363   2                      if (v_b_mv >= chargeCompThreshMv) {
+ 364   3                              _CHARGE_SetState(CHG_ST_ABS);
+ 365   3                      }
+ 366   2                      break;
+ 367   2      
+ 368   2              case CHG_ST_ABS:
+ 369   2                      _CHARGE_AdjustCompBattV();
+ 370   2      
+ 371   2                      // Look for termination condition - only terminate if current falls off while voltage is at
+ 372   2                      // absorption setpoint.  Timer prevents transient conditions (such as restarting after scan)
+ 373   2                      // from prematurely triggering exit.
+ 374   2                      if ((i_c_ma < I_ABS_CUTOFF) && BUCK_IsLimit2()) {
+ 375   3                              if (++chargeAbsTermCount == ABS_TERM_TIMEOUT) {
+ 376   4                                      _CHARGE_SetState(CHG_ST_FLT);
+ 377   4                              }
+ 378   3                      } else {
+ 379   3                              // Hold timer in reset
+ 380   3                              chargeAbsTermCount = 0;
+ 381   3                      }
+ 382   2                      break;
+ 383   2      
+ 384   2              case CHG_ST_FLT:  // Maintain float voltage until conditions evaluated above move us to IDLE
+ 385   2                      _CHARGE_AdjustCompBattV();
+ 386   2                      break;
+ 387   2      
+ 388   2              default:
+ 389   2                      _CHARGE_SetState(CHG_ST_IDLE);
+ 390   2                      break;
+ 391   2              }
+ 392   1      
+ 393   1              // Update SMBus registers
+ 394   1              SMB_SetStatusBit(SMB_ST_T_LIM_MASK, chargeTempLimited);
+ 395   1              SMB_SetIndexedValue(SMB_INDEX_TH, chargeCompThreshMv);
+ 396   1      }
+ 397          
+ 398          
+ 399          
+ 400          //-----------------------------------------------------------------------------
+ 401          // Internal Routines
+ 402          //-----------------------------------------------------------------------------
+ 403          
+ 404          void _CHARGE_SetState(uint8_t newSt)
+ 405          {
+ 406   1              chargeState = newSt;
+ 407   1              switch (chargeState) {
+ 408   2              case CHG_ST_NIGHT:
+ 409   2                      _CHARGE_SetRegulate(false);
+ 410   2                      break;
+ 411   2      
+ 412   2              case CHG_ST_IDLE:
+ 413   2                      chargeTimeoutCount = 0;  // Setup timer for night detection
+ 414   2                      _CHARGE_SetRegulate(false);
+ 415   2                      break;
+ 416   2      
+ 417   2              case CHG_ST_VSRCV:
+ 418   2                      chargeTimeoutCount = 0;  // Setup timer for recovery period
+ 419   2                      _CHARGE_SetRegulate(false);
+ 420   2                      break;
+ 421   2      
+ 422   2              case CHG_ST_SCAN:
+ 423   2                      chargeTimeoutCount = 0;  // Setup timer for next scan
+ 424   2                      _CHARGE_StartScan(v_b_mv + CHG_SCAN_END_DELTA, v_s_mv);
+ 425   2                      break;
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 8   
+
+ 426   2      
+ 427   2              case CHG_ST_BULK:
+ 428   2                      chargeLowProdCount = 0;  // Always init low production timer when we enter a new charge state
+ 429   2                      chargeHighCount = 0;     // Initialize high charge count when we enter the first of the high-charge stat
+             -es
+ 430   2                      _CHARGE_SetRegulate(true);
+ 431   2                      break;
+ 432   2      
+ 433   2              case CHG_ST_ABS:
+ 434   2                      chargeLowProdCount = 0;  // Always init low production timer when we enter a new charge state
+ 435   2                      chargeAbsTermCount = 0;  // Initialize Absorption termination condition reached timer
+ 436   2                      _CHARGE_SetRegulate(true);
+ 437   2                      break;
+ 438   2      
+ 439   2              case CHG_ST_FLT:
+ 440   2                      chargeLowProdCount = 0;  // Always init low production timer when we enter a new charge state
+ 441   2                      _CHARGE_SetRegulate(true);
+ 442   2                      break;
+ 443   2              }
+ 444   1      
+ 445   1              // Update STATUS
+ 446   1              SMB_SetStatusChargeState(chargeState);
+ 447   1      }
+ 448          
+ 449          
+ 450          uint16_t _CHARGE_ComputePower()
+ 451          {
+ 452   1              uint32_t p;
+ 453   1      
+ 454   1              solarPowerUw = (uint32_t) v_s_mv * (uint32_t) i_s_ma;
+ 455   1              p = solarPowerUw / (uint32_t) 1000;
+ 456   1              return ((uint16_t) p);
+ 457   1      }
+ 458          
+ 459          
+ 460          // _CHARGE_ComputePower must be called before this
+ 461          int16_t _CHARGE_ComputeChargeCurrent()
+ 462          {
+ 463   1              int32_t t;
+ 464   1      
+ 465   1              // Estimate using the following equations:
+ 466   1              //   EstimateBuckOutputCurrent = SolarCurrent * (BUCK_INPUT_V / BUCK_OUTPUT_V) * BuckEfficiency (while ch
+             -arging)
+ 467   1              //     (Optimization: We use solarPowerUw for SolarCurrent * BUCK_INPUT_V)
+ 468   1              //   BatteryChargeCurrent = EstimateBuckOutputCurrent - MeasuredLoadCurrent
+ 469   1              if (BUCK_IsEnabled()) {
+ 470   2                      t = (int32_t) solarPowerUw / (int32_t) v_b_mv;
+ 471   2                      t = t * (int32_t) BUCK_GetEfficiency(solarPowerMw);
+ 472   2                      t = t / 100;
+ 473   2              } else {
+ 474   2                      t = 0;
+ 475   2              }
+ 476   1              t = t - (int32_t) i_b_ma;
+ 477   1      
+ 478   1              return ((int16_t) t);
+ 479   1      }
+ 480          
+ 481          
+ 482          void _CHARGE_IncMpptRegVoltage()
+ 483          {
+ 484   1              chargeSolarRegMv += chargeMpptStepMv;
+ 485   1              if (chargeSolarRegMv > V_MAX_SOLARV) chargeSolarRegMv = V_MAX_SOLARV;
+ 486   1      }
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 9   
+
+ 487          
+ 488          
+ 489          void _CHARGE_DecMpptRegVoltage()
+ 490          {
+ 491   1              chargeSolarRegMv -= chargeMpptStepMv;
+ 492   1              if (chargeSolarRegMv < V_MIN_SOLARV) chargeSolarRegMv = V_MIN_SOLARV;
+ 493   1      }
+ 494          
+ 495          
+ 496          void _CHARGE_SetRegulate(bool en)
+ 497          {
+ 498   1              if (en) {
+ 499   2                      // (Re)configure the BUCK whenever MPPT regulation is enabled or re-enabled
+ 500   2                      BUCK_SetSolarVoltage(chargeSolarRegMv);
+ 501   2                      BUCK_SetBattVoltage(chargeCompThreshMv);
+ 502   2                      BUCK_EnableBatteryLimit(true);
+ 503   2              }
+ 504   1              BUCK_EnableRegulate(en);
+ 505   1              chargeMpptEnable = en;
+ 506   1      }
+ 507          
+ 508          
+ 509          void _CHARGE_AdjustCompBattV()
+ 510          {
+ 511   1              if (chargeCompThreshMv != BUCK_GetCurBattRegMv()) {
+ 512   2                      BUCK_SetBattVoltage(chargeCompThreshMv);
+ 513   2              }
+ 514   1      }
+ 515          
+ 516          
+ 517          void _CHARGE_StartScan(uint16_t lowMv, uint16_t highMv)
+ 518          {
+ 519   1              chargeMpptScanEnable = true;
+ 520   1              chargeScanEndMv = lowMv;
+ 521   1              chargeSolarRegMv = highMv;
+ 522   1              chargeMaxPower = 0;
+ 523   1              chargeMpptEnable = false;
+ 524   1              BUCK_SetSolarVoltage(highMv);
+ 525   1              BUCK_EnableBatteryLimit(false);  // Force regulation on solar side only
+ 526   1              BUCK_EnableRegulate(true);
+ 527   1      }
+ 528          
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 10  
+
+ASSEMBLY LISTING OF GENERATED OBJECT CODE
+
+
+             ; FUNCTION Com0085 (BEGIN)
+0000         L?0134:
+0000         L?0135:
+0000 7800        R     MOV     R0,#LOW chargeTimeoutCount
+0002         L?0136:
+0002 08                INC     R0
+0003 E2                MOVX    A,@R0
+0004 2401              ADD     A,#01H
+0006 FF                MOV     R7,A
+0007 F2                MOVX    @R0,A
+0008 18                DEC     R0
+0009 E2                MOVX    A,@R0
+000A 3400              ADDC    A,#00H
+000C FE                MOV     R6,A
+000D F2                MOVX    @R0,A
+000E 22                RET     
+000F         L?0137:
+000F 7800        R     MOV     R0,#LOW solarPowerUw
+0011         L?0138:
+0011 E2                MOVX    A,@R0
+0012 FC                MOV     R4,A
+0013 08                INC     R0
+0014 E2                MOVX    A,@R0
+0015 FD                MOV     R5,A
+0016         L?0139:
+0016 08                INC     R0
+0017 E2                MOVX    A,@R0
+0018 FE                MOV     R6,A
+0019 08                INC     R0
+001A E2                MOVX    A,@R0
+001B FF                MOV     R7,A
+001C 22                RET     
+001D         L?0140:
+001D C3                CLR     C
+001E         L?0141:
+001E 7800        R     MOV     R0,#LOW v_b_mv+01H
+0020 E2                MOVX    A,@R0
+0021 9F                SUBB    A,R7
+0022 18                DEC     R0
+0023 E2                MOVX    A,@R0
+0024 9E                SUBB    A,R6
+0025 22                RET     
+0026         L?0143:
+0026         L?0144:
+0026 E4                CLR     A
+0027 7800        R     MOV     R0,#LOW chargeTimeoutCount
+0029 F2                MOVX    @R0,A
+002A 08                INC     R0
+002B F2                MOVX    @R0,A
+002C 22                RET     
+002D         L?0145:
+002D E2                MOVX    A,@R0
+002E FF                MOV     R7,A
+002F 08                INC     R0
+0030 E2                MOVX    A,@R0
+0031 CF                XCH     A,R7
+0032         L?0146:
+0032 7800        R     MOV     R0,#LOW chargeCompThreshMv
+0034 F2                MOVX    @R0,A
+0035 08                INC     R0
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 11  
+
+0036 EF                MOV     A,R7
+0037 F2                MOVX    @R0,A
+0038 22                RET     
+0039         L?0147:
+0039         L?0148:
+0039 7800        R     MOV     R0,#LOW v_s_mv
+003B E2                MOVX    A,@R0
+003C FC                MOV     R4,A
+003D 08                INC     R0
+003E E2                MOVX    A,@R0
+003F FD                MOV     R5,A
+0040 22                RET     
+0041         L?0149:
+0041 E2                MOVX    A,@R0
+0042 FF                MOV     R7,A
+0043 08                INC     R0
+0044 E2                MOVX    A,@R0
+0045 7800        R     MOV     R0,#LOW chargeSolarRegMv
+0047 CF                XCH     A,R7
+0048 F2                MOVX    @R0,A
+0049 08                INC     R0
+004A EF                MOV     A,R7
+004B F2                MOVX    @R0,A
+004C 22                RET     
+004D         L?0150:
+004D         L?0151:
+004D 7800        R     MOV     R0,#LOW chargeMpptStepMv
+004F E2                MOVX    A,@R0
+0050 FE                MOV     R6,A
+0051 08                INC     R0
+0052 E2                MOVX    A,@R0
+0053 FF                MOV     R7,A
+0054 22                RET     
+0055         L?0152:
+0055         L?0153:
+0055 7800        R     MOV     R0,#LOW chargeCompThreshMv
+0057 E2                MOVX    A,@R0
+0058 FE                MOV     R6,A
+0059 08                INC     R0
+005A E2                MOVX    A,@R0
+005B FF                MOV     R7,A
+005C 22                RET     
+005D         L?0154:
+005D FF                MOV     R7,A
+005E C3                CLR     C
+005F E2                MOVX    A,@R0
+0060 9F                SUBB    A,R7
+0061 18                DEC     R0
+0062 E2                MOVX    A,@R0
+0063 9E                SUBB    A,R6
+0064 22                RET     
+0065         L?0155:
+0065 F2                MOVX    @R0,A
+0066 08                INC     R0
+0067 EF                MOV     A,R7
+0068 F2                MOVX    @R0,A
+0069 C3                CLR     C
+006A 94E0              SUBB    A,#0E0H
+006C EE                MOV     A,R6
+006D 942E              SUBB    A,#02EH
+006F 22                RET     
+0070         L?0156:
+0070 EF                MOV     A,R7
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 12  
+
+0071 9D                SUBB    A,R5
+0072 EC                MOV     A,R4
+0073 6480              XRL     A,#080H
+0075 F8                MOV     R0,A
+0076 EE                MOV     A,R6
+0077 6480              XRL     A,#080H
+0079 98                SUBB    A,R0
+007A 22                RET     
+007B         L?0157:
+007B 7800        R     MOV     R0,#LOW v_b_mv+01H
+007D E2                MOVX    A,@R0
+007E 9404              SUBB    A,#04H
+0080 18                DEC     R0
+0081 E2                MOVX    A,@R0
+0082 9429              SUBB    A,#029H
+0084 22                RET     
+             ; FUNCTION Com0085 (END)
+
+             ; FUNCTION CHARGE_Init (BEGIN)
+                                           ; SOURCE LINE # 96
+                                           ; SOURCE LINE # 97
+0000 C200        R     CLR     chargeMpptEnable
+                                           ; SOURCE LINE # 98
+0002 C200        R     CLR     chargeMpptScanEnable
+                                           ; SOURCE LINE # 99
+0004 C200        R     CLR     chargeTempLimited
+                                           ; SOURCE LINE # 100
+0006 7800        R     MOV     R0,#LOW chargeSolarRegMv
+0008 7446              MOV     A,#046H
+000A F2                MOVX    @R0,A
+000B 08                INC     R0
+000C 7450              MOV     A,#050H
+000E F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 101
+000F 7800        R     MOV     R0,#LOW chargeMpptStepMv
+0011 E4                CLR     A
+0012 F2                MOVX    @R0,A
+0013 08                INC     R0
+0014 74C8              MOV     A,#0C8H
+0016 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 102
+0017 E4                CLR     A
+0018 7800        R     MOV     R0,#LOW chargeLowProdCount
+001A F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 103
+001B 7800        R     MOV     R0,#LOW chargeAbsTermCount
+001D F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 104
+001E 7800        R     MOV     R0,#LOW chargeHighCount
+0020 F2                MOVX    @R0,A
+0021 08                INC     R0
+0022 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 105
+0023 7800        R     MOV     R0,#LOW chargeTimeoutCount
+0025 F2                MOVX    @R0,A
+0026 08                INC     R0
+0027 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 106
+0028 120000      E     LCALL   PARAM_GetFloatMv
+002B EE                MOV     A,R6
+002C 120000      R     LCALL   L?0146
+                                           ; SOURCE LINE # 109
+002F E4                CLR     A
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 13  
+
+0030 FF                MOV     R7,A
+0031 120000      E     LCALL   _ADC_GetValue
+0034 C3                CLR     C
+0035 EF                MOV     A,R7
+0036 94C0              SUBB    A,#0C0H
+0038 EE                MOV     A,R6
+0039 940D              SUBB    A,#0DH
+003B 5005              JNC     ?C0001
+                                           ; SOURCE LINE # 110
+003D E4                CLR     A
+003E 7800        R     MOV     R0,#LOW chargeState
+0040 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 111
+0041 22                RET     
+0042         ?C0001:
+                                           ; SOURCE LINE # 112
+0042 7800        R     MOV     R0,#LOW chargeState
+0044 7401              MOV     A,#01H
+0046 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 113
+                                           ; SOURCE LINE # 114
+0047         ?C0003:
+0047 22                RET     
+             ; FUNCTION CHARGE_Init (END)
+
+             ; FUNCTION CHARGE_MpptUpdate (BEGIN)
+                                           ; SOURCE LINE # 118
+                                           ; SOURCE LINE # 124
+0000 E4                CLR     A
+0001 FF                MOV     R7,A
+0002 120000      E     LCALL   _ADC_GetValue
+0005 7800        R     MOV     R0,#LOW v_s_mv
+0007 EE                MOV     A,R6
+0008 F2                MOVX    @R0,A
+0009 08                INC     R0
+000A EF                MOV     A,R7
+000B F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 125
+000C 7F01              MOV     R7,#01H
+000E 120000      E     LCALL   _ADC_GetValue
+0011 7800        R     MOV     R0,#LOW i_s_ma
+0013 EE                MOV     A,R6
+0014 F2                MOVX    @R0,A
+0015 08                INC     R0
+0016 EF                MOV     A,R7
+0017 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 126
+0018 7F02              MOV     R7,#02H
+001A 120000      E     LCALL   _ADC_GetValue
+001D 7800        R     MOV     R0,#LOW v_b_mv
+001F EE                MOV     A,R6
+0020 F2                MOVX    @R0,A
+0021 08                INC     R0
+0022 EF                MOV     A,R7
+0023 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 127
+0024 7F03              MOV     R7,#03H
+0026 120000      E     LCALL   _ADC_GetValue
+0029 7800        R     MOV     R0,#LOW i_b_ma
+002B EE                MOV     A,R6
+002C F2                MOVX    @R0,A
+002D 08                INC     R0
+002E EF                MOV     A,R7
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 14  
+
+002F F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 128
+0030 120000      R     LCALL   _CHARGE_ComputePower
+0033 7800        R     MOV     R0,#LOW solarPowerMw
+0035 EE                MOV     A,R6
+0036 F2                MOVX    @R0,A
+0037 08                INC     R0
+0038 EF                MOV     A,R7
+0039 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 129
+003A 120000      R     LCALL   _CHARGE_ComputeChargeCurrent
+003D 7800        R     MOV     R0,#LOW i_c_ma
+003F EE                MOV     A,R6
+0040 F2                MOVX    @R0,A
+0041 08                INC     R0
+0042 EF                MOV     A,R7
+0043 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 132
+0044 300050            JNB     chargeMpptScanEnable,?C0004
+                                           ; SOURCE LINE # 134
+0047 7800        R     MOV     R0,#LOW chargeMaxPower
+0049 E2                MOVX    A,@R0
+004A FE                MOV     R6,A
+004B 08                INC     R0
+004C E2                MOVX    A,@R0
+004D FF                MOV     R7,A
+004E 7800        R     MOV     R0,#LOW solarPowerMw
+0050 E2                MOVX    A,@R0
+0051 FC                MOV     R4,A
+0052 08                INC     R0
+0053 E2                MOVX    A,@R0
+0054 FD                MOV     R5,A
+0055 D3                SETB    C
+0056 9F                SUBB    A,R7
+0057 EC                MOV     A,R4
+0058 9E                SUBB    A,R6
+0059 4014              JC      ?C0005
+                                           ; SOURCE LINE # 135
+005B 7800        R     MOV     R0,#LOW chargeMaxPower
+005D EC                MOV     A,R4
+005E F2                MOVX    @R0,A
+005F 08                INC     R0
+0060 ED                MOV     A,R5
+0061 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 136
+0062 7800        R     MOV     R0,#LOW v_s_mv
+0064 E2                MOVX    A,@R0
+0065 FF                MOV     R7,A
+0066 08                INC     R0
+0067 E2                MOVX    A,@R0
+0068 7800        R     MOV     R0,#LOW chargeMaxScanVSetpoint
+006A CF                XCH     A,R7
+006B F2                MOVX    @R0,A
+006C 08                INC     R0
+006D EF                MOV     A,R7
+006E F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 137
+006F         ?C0005:
+                                           ; SOURCE LINE # 140
+006F 7800        R     MOV     R0,#LOW chargeSolarRegMv+01H
+0071 E2                MOVX    A,@R0
+0072 2438              ADD     A,#038H
+0074 F2                MOVX    @R0,A
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 15  
+
+0075 18                DEC     R0
+0076 E2                MOVX    A,@R0
+0077 34FF              ADDC    A,#0FFH
+0079 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 141
+007A E2                MOVX    A,@R0
+007B FE                MOV     R6,A
+007C 08                INC     R0
+007D E2                MOVX    A,@R0
+007E FF                MOV     R7,A
+007F 120000      E     LCALL   _BUCK_SetSolarVoltage
+                                           ; SOURCE LINE # 144
+0082 7800        R     MOV     R0,#LOW chargeScanEndMv
+0084 E2                MOVX    A,@R0
+0085 FE                MOV     R6,A
+0086 08                INC     R0
+0087 E2                MOVX    A,@R0
+0088 7800        R     MOV     R0,#LOW chargeSolarRegMv+01H
+008A 120000      R     LCALL   L?0154
+008D 4003              JC      $ + 5H
+008F 020000      R     LJMP    ?C0007
+                                           ; SOURCE LINE # 145
+0092 C200        R     CLR     chargeMpptScanEnable
+                                           ; SOURCE LINE # 146
+                                           ; SOURCE LINE # 147
+0094 020000      R     LJMP    ?C0007
+0097         ?C0004:
+                                           ; SOURCE LINE # 151
+0097 200003      R     JB      chargeMpptEnable,$ + 6H
+009A 020000      R     LJMP    ?C0007
+                                           ; SOURCE LINE # 152
+009D 200003            JB      buckLimit1,?C0010
+00A0 300008            JNB     buckLimit2,?C0009
+00A3         ?C0010:
+                                           ; SOURCE LINE # 155
+00A3 7800        R     MOV     R0,#LOW v_s_mv
+00A5 120000      R     LCALL   L?0149
+                                           ; SOURCE LINE # 156
+00A8 020000      R     LJMP    ?C0007
+00AB         ?C0009:
+                                           ; SOURCE LINE # 158
+00AB 7800        R     MOV     R0,#LOW i_s_ma
+00AD E2                MOVX    A,@R0
+00AE FE                MOV     R6,A
+00AF 08                INC     R0
+00B0 E2                MOVX    A,@R0
+00B1 FF                MOV     R7,A
+00B2 D3                SETB    C
+00B3 94C8              SUBB    A,#0C8H
+00B5 EE                MOV     A,R6
+00B6 9400              SUBB    A,#00H
+00B8 400A              JC      ?C0012
+                                           ; SOURCE LINE # 159
+00BA 7800        R     MOV     R0,#LOW chargeMpptStepMv
+00BC E4                CLR     A
+00BD F2                MOVX    @R0,A
+00BE 08                INC     R0
+00BF 7432              MOV     A,#032H
+00C1 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 160
+00C2 8019              SJMP    ?C0013
+00C4         ?C0012:
+00C4 D3                SETB    C
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 16  
+
+00C5 EF                MOV     A,R7
+00C6 9464              SUBB    A,#064H
+00C8 EE                MOV     A,R6
+00C9 9400              SUBB    A,#00H
+00CB 7800        R     MOV     R0,#LOW chargeMpptStepMv
+00CD 4008              JC      ?C0014
+                                           ; SOURCE LINE # 161
+00CF E4                CLR     A
+00D0 F2                MOVX    @R0,A
+00D1 08                INC     R0
+00D2 7464              MOV     A,#064H
+00D4 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 162
+00D5 8006              SJMP    ?C0013
+00D7         ?C0014:
+                                           ; SOURCE LINE # 163
+00D7 E4                CLR     A
+00D8 F2                MOVX    @R0,A
+00D9 08                INC     R0
+00DA 74C8              MOV     A,#0C8H
+00DC F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 164
+00DD         ?C0013:
+                                           ; SOURCE LINE # 170
+00DD C3                CLR     C
+00DE 7800        R     MOV     R0,#LOW chargeSolarRegMv+01H
+00E0 E2                MOVX    A,@R0
+00E1 9408              SUBB    A,#08H
+00E3 18                DEC     R0
+00E4 E2                MOVX    A,@R0
+00E5 9452              SUBB    A,#052H
+00E7 4024              JC      ?C0016
+00E9 7800        E     MOV     R0,#LOW buckCurVal+01H
+00EB E6                MOV     A,@R0
+00EC 18                DEC     R0
+00ED 46                ORL     A,@R0
+00EE 701D              JNZ     ?C0016
+                                           ; SOURCE LINE # 171
+00F0 120000      R     LCALL   L?0150
+00F3 7800        R     MOV     R0,#LOW v_s_mv+01H
+00F5 E2                MOVX    A,@R0
+00F6 9F                SUBB    A,R7
+00F7 FF                MOV     R7,A
+00F8 18                DEC     R0
+00F9 E2                MOVX    A,@R0
+00FA 9E                SUBB    A,R6
+00FB FE                MOV     R6,A
+00FC 7800        R     MOV     R0,#LOW chargeSolarRegMv
+                                           ; SOURCE LINE # 172
+00FE 120000      R     LCALL   L?0155
+0101 503E              JNC     ?C0018
+0103 18                DEC     R0
+0104 742E              MOV     A,#02EH
+0106 F2                MOVX    @R0,A
+0107 08                INC     R0
+0108 74E0              MOV     A,#0E0H
+010A F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 173
+010B 8034              SJMP    ?C0018
+010D         ?C0016:
+                                           ; SOURCE LINE # 175
+010D 7800        R     MOV     R0,#LOW lastSolarMv
+010F E2                MOVX    A,@R0
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 17  
+
+0110 FE                MOV     R6,A
+0111 08                INC     R0
+0112 E2                MOVX    A,@R0
+0113 7800        R     MOV     R0,#LOW v_s_mv+01H
+0115 120000      R     LCALL   L?0154
+0118 4003              JC      ?C0019
+011A D3                SETB    C
+011B 8001              SJMP    ?C0020
+011D         ?C0019:
+011D C3                CLR     C
+011E         ?C0020:
+011E 9200        R     MOV     deltaVpos,C
+                                           ; SOURCE LINE # 178
+0120 7800        R     MOV     R0,#LOW lastPowerMw
+0122 E2                MOVX    A,@R0
+0123 FE                MOV     R6,A
+0124 08                INC     R0
+0125 E2                MOVX    A,@R0
+0126 FF                MOV     R7,A
+0127 D3                SETB    C
+0128 7800        R     MOV     R0,#LOW solarPowerMw+01H
+012A E2                MOVX    A,@R0
+012B 9F                SUBB    A,R7
+012C 18                DEC     R0
+012D E2                MOVX    A,@R0
+012E 9E                SUBB    A,R6
+012F 4005              JC      ?C0021
+                                           ; SOURCE LINE # 184
+0131 300005            JNB     deltaVpos,?C0119
+                                           ; SOURCE LINE # 185
+                                           ; SOURCE LINE # 186
+0134 8008              SJMP    ?C0118
+0136         ?C0021:
+                                           ; SOURCE LINE # 195
+0136 300005            JNB     deltaVpos,?C0025
+                                           ; SOURCE LINE # 196
+0139         ?C0119:
+0139 120000      R     LCALL   _CHARGE_DecMpptRegVoltage
+                                           ; SOURCE LINE # 197
+013C 8003              SJMP    ?C0018
+013E         ?C0025:
+                                           ; SOURCE LINE # 198
+013E         ?C0118:
+013E 120000      R     LCALL   _CHARGE_IncMpptRegVoltage
+                                           ; SOURCE LINE # 199
+                                           ; SOURCE LINE # 200
+                                           ; SOURCE LINE # 201
+0141         ?C0018:
+                                           ; SOURCE LINE # 204
+0141 7800        R     MOV     R0,#LOW chargeSolarRegMv
+0143 E2                MOVX    A,@R0
+0144 FE                MOV     R6,A
+0145 08                INC     R0
+0146 E2                MOVX    A,@R0
+0147 FF                MOV     R7,A
+0148 120000      E     LCALL   _BUCK_SetSolarVoltage
+                                           ; SOURCE LINE # 205
+                                           ; SOURCE LINE # 206
+014B         ?C0007:
+                                           ; SOURCE LINE # 209
+014B 7800        R     MOV     R0,#LOW solarPowerMw
+014D E2                MOVX    A,@R0
+014E FF                MOV     R7,A
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 18  
+
+014F 08                INC     R0
+0150 E2                MOVX    A,@R0
+0151 7800        R     MOV     R0,#LOW lastPowerMw
+0153 CF                XCH     A,R7
+0154 F2                MOVX    @R0,A
+0155 08                INC     R0
+0156 EF                MOV     A,R7
+0157 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 210
+0158 120000      R     LCALL   L?0147
+015B 7800        R     MOV     R0,#LOW lastSolarMv
+015D EC                MOV     A,R4
+015E F2                MOVX    @R0,A
+015F 08                INC     R0
+0160 ED                MOV     A,R5
+0161 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 213
+0162 7F03              MOV     R7,#03H
+0164 120000      E     LCALL   _SMB_SetIndexedValue
+                                           ; SOURCE LINE # 214
+0167 7800        R     MOV     R0,#LOW i_s_ma
+0169 7F04              MOV     R7,#04H
+016B 120000      R     LCALL   L?0142
+                                           ; SOURCE LINE # 215
+016E 7800        R     MOV     R0,#LOW v_b_mv
+0170 7F05              MOV     R7,#05H
+0172 120000      R     LCALL   L?0142
+                                           ; SOURCE LINE # 216
+0175 7800        R     MOV     R0,#LOW i_b_ma
+0177 E2                MOVX    A,@R0
+0178 FC                MOV     R4,A
+0179 08                INC     R0
+017A E2                MOVX    A,@R0
+017B FD                MOV     R5,A
+017C 7F06              MOV     R7,#06H
+017E 120000      E     LCALL   _SMB_SetIndexedValue
+                                           ; SOURCE LINE # 217
+0181 7800        R     MOV     R0,#LOW i_c_ma
+0183 E2                MOVX    A,@R0
+0184 FC                MOV     R4,A
+0185 08                INC     R0
+0186 E2                MOVX    A,@R0
+0187 FD                MOV     R5,A
+0188 7F07              MOV     R7,#07H
+018A 120000      E     LCALL   _SMB_SetIndexedValue
+                                           ; SOURCE LINE # 218
+018D 7800        R     MOV     R0,#LOW chargeSolarRegMv
+018F E2                MOVX    A,@R0
+0190 FC                MOV     R4,A
+0191 08                INC     R0
+0192 E2                MOVX    A,@R0
+0193 FD                MOV     R5,A
+0194 7F0A              MOV     R7,#0AH
+0196 020000      E     LJMP    _SMB_SetIndexedValue
+                                           ; SOURCE LINE # 219
+0199         L?0142:
+0199 E2                MOVX    A,@R0
+019A FC                MOV     R4,A
+019B 08                INC     R0
+019C E2                MOVX    A,@R0
+019D FD                MOV     R5,A
+019E 120000      E     LCALL   _SMB_SetIndexedValue
+01A1 22                RET     
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 19  
+
+             ; FUNCTION CHARGE_MpptUpdate (END)
+
+             ; FUNCTION CHARGE_StateUpdate (BEGIN)
+                                           ; SOURCE LINE # 222
+                                           ; SOURCE LINE # 228
+0000 7800        R     MOV     R0,#LOW chargeState
+0002 E2                MOVX    A,@R0
+0003 FF                MOV     R7,A
+0004 6404              XRL     A,#04H
+0006 6005              JZ      ?C0029
+0008 EF                MOV     A,R7
+0009 6405              XRL     A,#05H
+000B 7039              JNZ     ?C0028
+000D         ?C0029:
+                                           ; SOURCE LINE # 230
+000D 7800        E     MOV     R0,#LOW TEMP_compBulkMv
+000F 120000      R     LCALL   L?0145
+                                           ; SOURCE LINE # 233
+0012 7800        E     MOV     R0,#LOW TEMP_compFloatMv+01H
+0014 E2                MOVX    A,@R0
+0015 2414              ADD     A,#014H
+0017 FF                MOV     R7,A
+0018 18                DEC     R0
+0019 E2                MOVX    A,@R0
+001A 3400              ADDC    A,#00H
+001C FE                MOV     R6,A
+001D D3                SETB    C
+001E 120000      R     LCALL   L?0141
+0021 401B              JC      ?C0030
+                                           ; SOURCE LINE # 234
+0023 7800        R     MOV     R0,#LOW chargeHighCount
+0025 120000      R     LCALL   L?0136
+0028 E4                CLR     A
+0029 FC                MOV     R4,A
+002A FD                MOV     R5,A
+002B 7BA0              MOV     R3,#0A0H
+002D 7A8C              MOV     R2,#08CH
+002F F9                MOV     R1,A
+0030 F8                MOV     R0,A
+0031 D3                SETB    C
+0032 120000      E     LCALL   ?C?SLCMP
+0035 5014              JNC     ?C0033
+                                           ; SOURCE LINE # 235
+0037 7F06              MOV     R7,#06H
+0039 120000      R     LCALL   __CHARGE_SetState
+                                           ; SOURCE LINE # 236
+                                           ; SOURCE LINE # 237
+003C 800D              SJMP    ?C0033
+003E         ?C0030:
+                                           ; SOURCE LINE # 238
+003E E4                CLR     A
+003F 7800        R     MOV     R0,#LOW chargeHighCount
+0041 F2                MOVX    @R0,A
+0042 08                INC     R0
+0043 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 239
+                                           ; SOURCE LINE # 240
+0044 8005              SJMP    ?C0033
+0046         ?C0028:
+                                           ; SOURCE LINE # 242
+0046 7800        E     MOV     R0,#LOW TEMP_compFloatMv
+0048 120000      R     LCALL   L?0145
+                                           ; SOURCE LINE # 243
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 20  
+
+004B         ?C0033:
+                                           ; SOURCE LINE # 246
+004B 7800        E     MOV     R0,#LOW TEMP_CurTempC10
+004D E2                MOVX    A,@R0
+004E FE                MOV     R6,A
+004F 08                INC     R0
+0050 E2                MOVX    A,@R0
+0051 FF                MOV     R7,A
+;---- Variable 't_c10' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 247
+0052 30002B            JNB     chargeTempLimited,?C0034
+                                           ; SOURCE LINE # 249
+0055 300006            JNB     PARAM_battIsLeadAcid,?C0037
+0058 7CFF              MOV     R4,#0FFH
+005A 7D6A              MOV     R5,#06AH
+005C 8004              SJMP    ?C0038
+005E         ?C0037:
+005E 7C00              MOV     R4,#00H
+0060 7D32              MOV     R5,#032H
+0062         ?C0038:
+0062 D3                SETB    C
+0063 120000      R     LCALL   L?0156
+0066 4003              JC      ?C0035
+0068 D3                SETB    C
+0069 8001              SJMP    ?C0036
+006B         ?C0035:
+006B C3                CLR     C
+006C         ?C0036:
+006C 9200        R     MOV     b,C
+                                           ; SOURCE LINE # 250
+006E C3                CLR     C
+006F EF                MOV     A,R7
+0070 94C2              SUBB    A,#0C2H
+0072 EE                MOV     A,R6
+0073 6480              XRL     A,#080H
+0075 9481              SUBB    A,#081H
+0077 503D              JNC     ?C0040
+0079 30003A            JNB     b,?C0040
+                                           ; SOURCE LINE # 251
+007C C200        R     CLR     chargeTempLimited
+                                           ; SOURCE LINE # 252
+                                           ; SOURCE LINE # 253
+007E 8036              SJMP    ?C0040
+0080         ?C0034:
+                                           ; SOURCE LINE # 255
+0080 300006            JNB     PARAM_battIsLeadAcid,?C0043
+0083 7CFF              MOV     R4,#0FFH
+0085 7D38              MOV     R5,#038H
+0087 8004              SJMP    ?C0044
+0089         ?C0043:
+0089 7C00              MOV     R4,#00H
+008B 7D00              MOV     R5,#00H
+008D         ?C0044:
+008D C3                CLR     C
+008E 120000      R     LCALL   L?0156
+0091 5002              JNC     ?C0041
+0093 8001              SJMP    ?C0042
+0095         ?C0041:
+0095 C3                CLR     C
+0096         ?C0042:
+0096 9200        R     MOV     b,C
+                                           ; SOURCE LINE # 256
+0098 D3                SETB    C
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 21  
+
+0099 EF                MOV     A,R7
+009A 94F4              SUBB    A,#0F4H
+009C EE                MOV     A,R6
+009D 6480              XRL     A,#080H
+009F 9481              SUBB    A,#081H
+00A1 5003              JNC     ?C0046
+00A3 300010            JNB     b,?C0040
+00A6         ?C0046:
+                                           ; SOURCE LINE # 257
+00A6 D200        R     SETB    chargeTempLimited
+                                           ; SOURCE LINE # 258
+00A8 7800        R     MOV     R0,#LOW chargeState
+00AA E2                MOVX    A,@R0
+00AB 6009              JZ      ?C0040
+00AD 6401              XRL     A,#01H
+00AF 6005              JZ      ?C0040
+                                           ; SOURCE LINE # 259
+00B1 7F01              MOV     R7,#01H
+00B3 120000      R     LCALL   __CHARGE_SetState
+                                           ; SOURCE LINE # 260
+                                           ; SOURCE LINE # 261
+                                           ; SOURCE LINE # 262
+00B6         ?C0040:
+                                           ; SOURCE LINE # 265
+00B6 7800        R     MOV     R0,#LOW chargeState
+00B8 E2                MOVX    A,@R0
+00B9 FF                MOV     R7,A
+00BA 6404              XRL     A,#04H
+00BC 600A              JZ      ?C0049
+00BE EF                MOV     A,R7
+00BF 6405              XRL     A,#05H
+00C1 6005              JZ      ?C0049
+00C3 EF                MOV     A,R7
+00C4 6406              XRL     A,#06H
+00C6 7051              JNZ     ?C0048
+00C8         ?C0049:
+                                           ; SOURCE LINE # 268
+00C8 C3                CLR     C
+00C9 120000      R     LCALL   L?0157
+00CC 5002              JNC     ?C0050
+                                           ; SOURCE LINE # 269
+                                           ; SOURCE LINE # 270
+00CE 803E              SJMP    ?C0120
+00D0         ?C0050:
+                                           ; SOURCE LINE # 273
+00D0 120000      R     LCALL   L?0134
+00D3 BE0218            CJNE    R6,#02H,?C0052
+00D6 BF5815            CJNE    R7,#058H,?C0052
+                                           ; SOURCE LINE # 278
+00D9 20000D            JB      buckLimit1,?C0053
+00DC 20000A            JB      buckLimit2,?C0053
+                                           ; SOURCE LINE # 279
+00DF 7800        R     MOV     R0,#LOW chargeState
+00E1 E2                MOVX    A,@R0
+00E2 7800        R     MOV     R0,#LOW scanExitChargeState
+00E4 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 280
+00E5 7F02              MOV     R7,#02H
+                                           ; SOURCE LINE # 281
+00E7 8027              SJMP    ?C0121
+00E9         ?C0053:
+                                           ; SOURCE LINE # 283
+00E9 120000      R     LCALL   L?0143
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 22  
+
+                                           ; SOURCE LINE # 284
+                                           ; SOURCE LINE # 285
+00EC 802B              SJMP    ?C0048
+00EE         ?C0052:
+                                           ; SOURCE LINE # 291
+00EE C3                CLR     C
+00EF 7800        R     MOV     R0,#LOW solarPowerMw+01H
+00F1 E2                MOVX    A,@R0
+00F2 9464              SUBB    A,#064H
+00F4 18                DEC     R0
+00F5 E2                MOVX    A,@R0
+00F6 9400              SUBB    A,#00H
+00F8 501B              JNC     ?C0056
+00FA 200018            JB      buckLimit1,?C0056
+00FD 200015            JB      buckLimit2,?C0056
+                                           ; SOURCE LINE # 292
+0100 7800        R     MOV     R0,#LOW chargeLowProdCount
+0102 E2                MOVX    A,@R0
+0103 04                INC     A
+0104 F2                MOVX    @R0,A
+0105 C3                CLR     C
+0106 940F              SUBB    A,#0FH
+0108 7480              MOV     A,#080H
+010A 9480              SUBB    A,#080H
+010C 400B              JC      ?C0048
+                                           ; SOURCE LINE # 293
+010E         ?C0120:
+010E 7F01              MOV     R7,#01H
+0110         ?C0121:
+0110 120000      R     LCALL   __CHARGE_SetState
+                                           ; SOURCE LINE # 294
+                                           ; SOURCE LINE # 295
+0113 8004              SJMP    ?C0048
+0115         ?C0056:
+                                           ; SOURCE LINE # 297
+0115 E4                CLR     A
+0116 7800        R     MOV     R0,#LOW chargeLowProdCount
+0118 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 298
+                                           ; SOURCE LINE # 299
+0119         ?C0048:
+                                           ; SOURCE LINE # 302
+0119 7800        R     MOV     R0,#LOW chargeState
+011B E2                MOVX    A,@R0
+011C B40700            CJNE    A,#07H,?C0112
+011F         ?C0112:
+011F 4003              JC      $ + 5H
+0121 020000      R     LJMP    ?C0088
+0124 900000      R     MOV     DPTR,#?C0113
+0127 F8                MOV     R0,A
+0128 28                ADD     A,R0
+0129 28                ADD     A,R0
+012A 73                JMP     @A+DPTR
+012B         ?C0113:
+012B 020000      R     LJMP    ?C0060
+012E 020000      R     LJMP    ?C0065
+0131 020000      R     LJMP    ?C0076
+0134 020000      R     LJMP    ?C0078
+0137 020000      R     LJMP    ?C0081
+013A 020000      R     LJMP    ?C0083
+013D 020000      R     LJMP    ?C0087
+                                           ; SOURCE LINE # 303
+0140         ?C0060:
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 23  
+
+                                           ; SOURCE LINE # 304
+0140 D3                SETB    C
+0141 7800        R     MOV     R0,#LOW v_s_mv+01H
+0143 E2                MOVX    A,@R0
+0144 94C0              SUBB    A,#0C0H
+0146 18                DEC     R0
+0147 E2                MOVX    A,@R0
+0148 940D              SUBB    A,#0DH
+014A 4015              JC      ?C0061
+                                           ; SOURCE LINE # 309
+014C 200003      E     JB      POWER_enableAtNight,$ + 6H
+014F 020000      R     LJMP    ?C0122
+0152 120000      R     LCALL   L?0134
+0155 EF                MOV     A,R7
+0156 643C              XRL     A,#03CH
+0158 4E                ORL     A,R6
+0159 6003              JZ      $ + 5H
+015B 020000      R     LJMP    ?C0059
+015E         ?C0063:
+                                           ; SOURCE LINE # 310
+                                           ; SOURCE LINE # 311
+                                           ; SOURCE LINE # 312
+015E 020000      R     LJMP    ?C0122
+0161         ?C0061:
+                                           ; SOURCE LINE # 314
+0161 120000      R     LCALL   L?0143
+                                           ; SOURCE LINE # 315
+                                           ; SOURCE LINE # 316
+0164 020000      R     LJMP    ?C0059
+                                           ; SOURCE LINE # 318
+0167         ?C0065:
+                                           ; SOURCE LINE # 319
+0167 C3                CLR     C
+0168 7800        R     MOV     R0,#LOW v_s_mv+01H
+016A E2                MOVX    A,@R0
+016B 9498              SUBB    A,#098H
+016D 18                DEC     R0
+016E E2                MOVX    A,@R0
+016F 940D              SUBB    A,#0DH
+0171 5014              JNC     ?C0066
+                                           ; SOURCE LINE # 320
+0173 120000      R     LCALL   L?0135
+0176 EF                MOV     A,R7
+0177 642C              XRL     A,#02CH
+0179 7003              JNZ     ?C0114
+017B EE                MOV     A,R6
+017C 6401              XRL     A,#01H
+017E         ?C0114:
+017E 6003              JZ      $ + 5H
+0180 020000      R     LJMP    ?C0059
+                                           ; SOURCE LINE # 321
+0183 FF                MOV     R7,A
+                                           ; SOURCE LINE # 322
+                                           ; SOURCE LINE # 323
+0184 020000      R     LJMP    ?C0127
+0187         ?C0066:
+                                           ; SOURCE LINE # 324
+0187 120000      R     LCALL   L?0144
+                                           ; SOURCE LINE # 327
+018A D3                SETB    C
+018B 7800        R     MOV     R0,#LOW v_s_mv+01H
+018D E2                MOVX    A,@R0
+018E 9450              SUBB    A,#050H
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 24  
+
+0190 18                DEC     R0
+0191 E2                MOVX    A,@R0
+0192 9446              SUBB    A,#046H
+0194 5003              JNC     $ + 5H
+0196 020000      R     LJMP    ?C0059
+0199 120000      R     LCALL   L?0157
+019C 5003              JNC     $ + 5H
+019E 020000      R     LJMP    ?C0059
+01A1 300003      R     JNB     chargeTempLimited,$ + 6H
+01A4 020000      R     LJMP    ?C0059
+                                           ; SOURCE LINE # 328
+01A7 7F03              MOV     R7,#03H
+01A9 120000      R     LCALL   __CHARGE_SetState
+                                           ; SOURCE LINE # 329
+01AC 300006            JNB     PARAM_battIsLeadAcid,?C0072
+01AF 7E31              MOV     R6,#031H
+01B1 7F9C              MOV     R7,#09CH
+01B3 8004              SJMP    ?C0073
+01B5         ?C0072:
+01B5 7E33              MOV     R6,#033H
+01B7 7F90              MOV     R7,#090H
+01B9         ?C0073:
+01B9 120000      R     LCALL   L?0140
+01BC 5002              JNC     ?C0070
+01BE 8001              SJMP    ?C0071
+01C0         ?C0070:
+01C0 C3                CLR     C
+01C1         ?C0071:
+01C1 9200        R     MOV     b,C
+                                           ; SOURCE LINE # 330
+01C3 7800        R     MOV     R0,#LOW scanExitChargeState
+01C5 300005            JNB     b,?C0074
+                                           ; SOURCE LINE # 331
+01C8 7404              MOV     A,#04H
+01CA F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 332
+01CB 8076              SJMP    ?C0059
+01CD         ?C0074:
+                                           ; SOURCE LINE # 333
+01CD 7406              MOV     A,#06H
+01CF F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 334
+                                           ; SOURCE LINE # 335
+                                           ; SOURCE LINE # 336
+                                           ; SOURCE LINE # 337
+01D0 8071              SJMP    ?C0059
+                                           ; SOURCE LINE # 339
+01D2         ?C0076:
+                                           ; SOURCE LINE # 340
+01D2 120000      R     LCALL   L?0135
+01D5 EF                MOV     A,R7
+01D6 6403              XRL     A,#03H
+01D8 4E                ORL     A,R6
+01D9 7068              JNZ     ?C0059
+                                           ; SOURCE LINE # 341
+01DB 7F03              MOV     R7,#03H
+01DD         ?C0123:
+                                           ; SOURCE LINE # 342
+                                           ; SOURCE LINE # 343
+01DD 8061              SJMP    ?C0127
+                                           ; SOURCE LINE # 345
+01DF         ?C0078:
+                                           ; SOURCE LINE # 346
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 25  
+
+01DF 200061            JB      chargeMpptScanEnable,?C0059
+                                           ; SOURCE LINE # 348
+01E2 C200        E     CLR     ?BUCK_EnableRegulate?BIT
+01E4 120000      E     LCALL   BUCK_EnableRegulate
+                                           ; SOURCE LINE # 349
+01E7 7800        R     MOV     R0,#LOW chargeMaxScanVSetpoint
+01E9 120000      R     LCALL   L?0149
+                                           ; SOURCE LINE # 350
+01EC 7800        R     MOV     R0,#LOW scanExitChargeState
+01EE E2                MOVX    A,@R0
+01EF FF                MOV     R7,A
+01F0 6406              XRL     A,#06H
+01F2 600D              JZ      ?C0080
+                                           ; SOURCE LINE # 353
+01F4 7800        E     MOV     R0,#LOW TEMP_compBulkMv
+01F6 E2                MOVX    A,@R0
+01F7 FD                MOV     R5,A
+01F8 08                INC     R0
+01F9 E2                MOVX    A,@R0
+01FA 7800        R     MOV     R0,#LOW chargeCompThreshMv
+01FC CD                XCH     A,R5
+01FD F2                MOVX    @R0,A
+01FE 08                INC     R0
+01FF ED                MOV     A,R5
+0200 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 354
+0201         ?C0080:
+                                           ; SOURCE LINE # 355
+0201         ?C0124:
+                                           ; SOURCE LINE # 356
+                                           ; SOURCE LINE # 357
+0201 803D              SJMP    ?C0127
+                                           ; SOURCE LINE # 359
+0203         ?C0081:
+                                           ; SOURCE LINE # 360
+0203 120000      R     LCALL   _CHARGE_AdjustCompBattV
+                                           ; SOURCE LINE # 363
+0206 120000      R     LCALL   L?0152
+0209 120000      R     LCALL   L?0140
+020C 4035              JC      ?C0059
+                                           ; SOURCE LINE # 364
+020E 7F05              MOV     R7,#05H
+0210         ?C0125:
+                                           ; SOURCE LINE # 365
+                                           ; SOURCE LINE # 366
+0210 802E              SJMP    ?C0127
+                                           ; SOURCE LINE # 368
+0212         ?C0083:
+                                           ; SOURCE LINE # 369
+0212 120000      R     LCALL   _CHARGE_AdjustCompBattV
+                                           ; SOURCE LINE # 374
+0215 C3                CLR     C
+0216 7800        R     MOV     R0,#LOW i_c_ma+01H
+0218 E2                MOVX    A,@R0
+0219 942C              SUBB    A,#02CH
+021B 18                DEC     R0
+021C E2                MOVX    A,@R0
+021D 6480              XRL     A,#080H
+021F 9481              SUBB    A,#081H
+0221 5010              JNC     ?C0084
+0223 30000D            JNB     buckLimit2,?C0084
+                                           ; SOURCE LINE # 375
+0226 7800        R     MOV     R0,#LOW chargeAbsTermCount
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 26  
+
+0228 E2                MOVX    A,@R0
+0229 04                INC     A
+022A F2                MOVX    @R0,A
+022B 641E              XRL     A,#01EH
+022D 7014              JNZ     ?C0059
+                                           ; SOURCE LINE # 376
+022F 7F06              MOV     R7,#06H
+0231         ?C0126:
+                                           ; SOURCE LINE # 377
+                                           ; SOURCE LINE # 378
+0231 800D              SJMP    ?C0127
+0233         ?C0084:
+                                           ; SOURCE LINE # 380
+0233 E4                CLR     A
+0234 7800        R     MOV     R0,#LOW chargeAbsTermCount
+0236 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 381
+                                           ; SOURCE LINE # 382
+0237 800A              SJMP    ?C0059
+                                           ; SOURCE LINE # 384
+0239         ?C0087:
+                                           ; SOURCE LINE # 385
+0239 120000      R     LCALL   _CHARGE_AdjustCompBattV
+                                           ; SOURCE LINE # 386
+023C 8005              SJMP    ?C0059
+                                           ; SOURCE LINE # 388
+023E         ?C0088:
+                                           ; SOURCE LINE # 389
+023E         ?C0122:
+023E 7F01              MOV     R7,#01H
+0240         ?C0127:
+0240 120000      R     LCALL   __CHARGE_SetState
+                                           ; SOURCE LINE # 390
+                                           ; SOURCE LINE # 391
+0243         ?C0059:
+                                           ; SOURCE LINE # 394
+0243 A200        R     MOV     C,chargeTempLimited
+0245 9200        E     MOV     ?_SMB_SetStatusBit?BIT,C
+0247 7F10              MOV     R7,#010H
+0249 7E00              MOV     R6,#00H
+024B 120000      E     LCALL   _SMB_SetStatusBit
+                                           ; SOURCE LINE # 395
+024E 7800        R     MOV     R0,#LOW chargeCompThreshMv
+0250 E2                MOVX    A,@R0
+0251 FC                MOV     R4,A
+0252 08                INC     R0
+0253 E2                MOVX    A,@R0
+0254 FD                MOV     R5,A
+0255 7F0B              MOV     R7,#0BH
+0257 020000      E     LJMP    _SMB_SetIndexedValue
+             ; FUNCTION CHARGE_StateUpdate (END)
+
+             ; FUNCTION __CHARGE_SetState (BEGIN)
+                                           ; SOURCE LINE # 404
+;---- Variable 'newSt' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 405
+                                           ; SOURCE LINE # 406
+0000 7800        R     MOV     R0,#LOW chargeState
+0002 EF                MOV     A,R7
+0003 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 407
+0004 B40700            CJNE    A,#07H,?C0115
+0007         ?C0115:
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 27  
+
+0007 505C              JNC     ?C0090
+0009 900000      R     MOV     DPTR,#?C0116
+000C F8                MOV     R0,A
+000D 28                ADD     A,R0
+000E 28                ADD     A,R0
+000F 73                JMP     @A+DPTR
+0010         ?C0116:
+0010 020000      R     LJMP    ?C0091
+0013 020000      R     LJMP    ?C0092
+0016 020000      R     LJMP    ?C0092
+0019 020000      R     LJMP    ?C0094
+001C 020000      R     LJMP    ?C0095
+001F 020000      R     LJMP    ?C0096
+0022 020000      R     LJMP    ?C0097
+                                           ; SOURCE LINE # 408
+0025         ?C0091:
+                                           ; SOURCE LINE # 409
+                                           ; SOURCE LINE # 410
+0025 8003              SJMP    ?C0129
+                                           ; SOURCE LINE # 412
+0027         ?C0092:
+                                           ; SOURCE LINE # 413
+0027 120000      R     LCALL   L?0144
+                                           ; SOURCE LINE # 414
+002A         ?C0128:
+                                           ; SOURCE LINE # 415
+                                           ; SOURCE LINE # 417
+002A         ?C0129:
+002A C200        R     CLR     ?_CHARGE_SetRegulate?BIT
+                                           ; SOURCE LINE # 420
+002C 8034              SJMP    ?C0132
+                                           ; SOURCE LINE # 422
+002E         ?C0094:
+                                           ; SOURCE LINE # 423
+002E 120000      R     LCALL   L?0144
+                                           ; SOURCE LINE # 424
+0031 7800        R     MOV     R0,#LOW v_b_mv+01H
+0033 E2                MOVX    A,@R0
+0034 24DC              ADD     A,#0DCH
+0036 FF                MOV     R7,A
+0037 18                DEC     R0
+0038 E2                MOVX    A,@R0
+0039 3405              ADDC    A,#05H
+003B FE                MOV     R6,A
+003C 120000      R     LCALL   L?0148
+003F 120000      R     LCALL   __CHARGE_StartScan
+                                           ; SOURCE LINE # 425
+0042 8021              SJMP    ?C0090
+                                           ; SOURCE LINE # 427
+0044         ?C0095:
+                                           ; SOURCE LINE # 428
+0044 E4                CLR     A
+0045 7800        R     MOV     R0,#LOW chargeLowProdCount
+0047 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 429
+0048 7800        R     MOV     R0,#LOW chargeHighCount
+004A F2                MOVX    @R0,A
+004B 08                INC     R0
+004C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 430
+004D D200        R     SETB    ?_CHARGE_SetRegulate?BIT
+004F         ?C0130:
+                                           ; SOURCE LINE # 431
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 28  
+
+004F 8011              SJMP    ?C0132
+                                           ; SOURCE LINE # 433
+0051         ?C0096:
+                                           ; SOURCE LINE # 434
+0051 E4                CLR     A
+0052 7800        R     MOV     R0,#LOW chargeLowProdCount
+0054 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 435
+0055 7800        R     MOV     R0,#LOW chargeAbsTermCount
+0057 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 436
+0058 D200        R     SETB    ?_CHARGE_SetRegulate?BIT
+005A         ?C0131:
+                                           ; SOURCE LINE # 437
+005A 8006              SJMP    ?C0132
+                                           ; SOURCE LINE # 439
+005C         ?C0097:
+                                           ; SOURCE LINE # 440
+005C E4                CLR     A
+005D 7800        R     MOV     R0,#LOW chargeLowProdCount
+005F F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 441
+0060 D200        R     SETB    ?_CHARGE_SetRegulate?BIT
+0062         ?C0132:
+0062 120000      R     LCALL   _CHARGE_SetRegulate
+                                           ; SOURCE LINE # 442
+                                           ; SOURCE LINE # 443
+0065         ?C0090:
+                                           ; SOURCE LINE # 446
+0065 7800        R     MOV     R0,#LOW chargeState
+0067 E2                MOVX    A,@R0
+0068 FF                MOV     R7,A
+0069 020000      E     LJMP    _SMB_SetStatusChargeState
+             ; FUNCTION __CHARGE_SetState (END)
+
+             ; FUNCTION _CHARGE_ComputePower (BEGIN)
+                                           ; SOURCE LINE # 450
+                                           ; SOURCE LINE # 451
+                                           ; SOURCE LINE # 454
+0000 7800        R     MOV     R0,#LOW i_s_ma
+0002 E2                MOVX    A,@R0
+0003 FE                MOV     R6,A
+0004 08                INC     R0
+0005 E2                MOVX    A,@R0
+0006 FF                MOV     R7,A
+0007 120000      R     LCALL   L?0147
+000A 120000      E     LCALL   ?C?LIMUL
+000D 7800        R     MOV     R0,#LOW solarPowerUw
+000F 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 455
+0012 E4                CLR     A
+0013 7BE8              MOV     R3,#0E8H
+0015 7A03              MOV     R2,#03H
+0017 F9                MOV     R1,A
+0018 F8                MOV     R0,A
+0019 C000              PUSH    AR0
+001B 120000      R     LCALL   L?0137
+001E D000              POP     AR0
+0020 020000      E     LJMP    ?C?ULDIV
+;---- Variable 'p' assigned to Register 'R4/R5/R6/R7' ----
+             ; FUNCTION _CHARGE_ComputePower (END)
+
+             ; FUNCTION _CHARGE_ComputeChargeCurrent (BEGIN)
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 29  
+
+                                           ; SOURCE LINE # 461
+                                           ; SOURCE LINE # 462
+                                           ; SOURCE LINE # 469
+0000 300058            JNB     buckEnable,?C0100
+                                           ; SOURCE LINE # 470
+0003 120000      R     LCALL   L?0137
+0006 C006              PUSH    AR6
+0008 C007              PUSH    AR7
+000A 7800        R     MOV     R0,#LOW v_b_mv
+000C E2                MOVX    A,@R0
+000D FE                MOV     R6,A
+000E 08                INC     R0
+000F E2                MOVX    A,@R0
+0010 FB                MOV     R3,A
+0011 AA06              MOV     R2,AR6
+0013 E4                CLR     A
+0014 F9                MOV     R1,A
+0015 F8                MOV     R0,A
+0016 D007              POP     AR7
+0018 D006              POP     AR6
+001A 120000      E     LCALL   ?C?SLDIV
+001D 7800        R     MOV     R0,#LOW t
+001F 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 471
+0022 7800        R     MOV     R0,#LOW solarPowerMw
+0024 E2                MOVX    A,@R0
+0025 FE                MOV     R6,A
+0026 08                INC     R0
+0027 E2                MOVX    A,@R0
+0028 FF                MOV     R7,A
+0029 120000      E     LCALL   _BUCK_GetEfficiency
+002C E4                CLR     A
+002D FC                MOV     R4,A
+002E FD                MOV     R5,A
+002F FE                MOV     R6,A
+0030 7800        R     MOV     R0,#LOW t
+0032 E2                MOVX    A,@R0
+0033 FB                MOV     R3,A
+0034 08                INC     R0
+0035 E2                MOVX    A,@R0
+0036 F9                MOV     R1,A
+0037 08                INC     R0
+0038 E2                MOVX    A,@R0
+0039 FA                MOV     R2,A
+003A 08                INC     R0
+003B E2                MOVX    A,@R0
+003C CB                XCH     A,R3
+003D F8                MOV     R0,A
+003E 120000      E     LCALL   ?C?LMUL
+0041 7800        R     MOV     R0,#LOW t
+0043 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 472
+0046 7800        R     MOV     R0,#LOW t
+0048 120000      R     LCALL   L?0138
+004B E4                CLR     A
+004C 7B64              MOV     R3,#064H
+004E FA                MOV     R2,A
+004F F9                MOV     R1,A
+0050 F8                MOV     R0,A
+0051 120000      E     LCALL   ?C?SLDIV
+0054 7800        R     MOV     R0,#LOW t
+0056 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 473
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 30  
+
+0059 8009              SJMP    ?C0101
+005B         ?C0100:
+                                           ; SOURCE LINE # 474
+005B 7800        R     MOV     R0,#LOW t
+005D 120000      E     LCALL   ?C?LSTKPDATA
+0060 00                DB      00H
+0061 00                DB      00H
+0062 00                DB      00H
+0063 00                DB      00H
+                                           ; SOURCE LINE # 475
+0064         ?C0101:
+                                           ; SOURCE LINE # 476
+0064 7800        R     MOV     R0,#LOW t
+0066 120000      R     LCALL   L?0138
+0069 C006              PUSH    AR6
+006B C007              PUSH    AR7
+006D 7800        R     MOV     R0,#LOW i_b_ma
+006F E2                MOVX    A,@R0
+0070 FE                MOV     R6,A
+0071 08                INC     R0
+0072 E2                MOVX    A,@R0
+0073 FB                MOV     R3,A
+0074 AA06              MOV     R2,AR6
+0076 D007              POP     AR7
+0078 D006              POP     AR6
+007A C3                CLR     C
+007B EF                MOV     A,R7
+007C 9B                SUBB    A,R3
+007D FF                MOV     R7,A
+007E EE                MOV     A,R6
+007F 9A                SUBB    A,R2
+0080 FE                MOV     R6,A
+0081 ED                MOV     A,R5
+0082 9400              SUBB    A,#00H
+0084 FD                MOV     R5,A
+0085 EC                MOV     A,R4
+0086 9400              SUBB    A,#00H
+0088 FC                MOV     R4,A
+0089 7800        R     MOV     R0,#LOW t
+008B 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 478
+008E 7800        R     MOV     R0,#LOW t
+0090 08                INC     R0
+0091 120000      R     LCALL   L?0139
+                                           ; SOURCE LINE # 479
+0094 22                RET     
+             ; FUNCTION _CHARGE_ComputeChargeCurrent (END)
+
+             ; FUNCTION _CHARGE_IncMpptRegVoltage (BEGIN)
+                                           ; SOURCE LINE # 482
+                                           ; SOURCE LINE # 483
+                                           ; SOURCE LINE # 484
+0000 120000      R     LCALL   L?0150
+0003 7800        R     MOV     R0,#LOW chargeSolarRegMv+01H
+0005 E2                MOVX    A,@R0
+0006 2F                ADD     A,R7
+0007 F2                MOVX    @R0,A
+0008 18                DEC     R0
+0009 E2                MOVX    A,@R0
+000A 3E                ADDC    A,R6
+000B F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 485
+000C D3                SETB    C
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 31  
+
+000D 08                INC     R0
+000E E2                MOVX    A,@R0
+000F 9408              SUBB    A,#08H
+0011 18                DEC     R0
+0012 E2                MOVX    A,@R0
+0013 9452              SUBB    A,#052H
+0015 4007              JC      ?C0104
+0017 7452              MOV     A,#052H
+0019 F2                MOVX    @R0,A
+001A 08                INC     R0
+001B 7408              MOV     A,#08H
+001D F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 486
+001E         ?C0104:
+001E 22                RET     
+             ; FUNCTION _CHARGE_IncMpptRegVoltage (END)
+
+             ; FUNCTION _CHARGE_DecMpptRegVoltage (BEGIN)
+                                           ; SOURCE LINE # 489
+                                           ; SOURCE LINE # 490
+                                           ; SOURCE LINE # 491
+0000 120000      R     LCALL   L?0151
+0003 C3                CLR     C
+0004 7800        R     MOV     R0,#LOW chargeSolarRegMv+01H
+0006 E2                MOVX    A,@R0
+0007 9F                SUBB    A,R7
+0008 FF                MOV     R7,A
+0009 18                DEC     R0
+000A E2                MOVX    A,@R0
+000B 9E                SUBB    A,R6
+000C FE                MOV     R6,A
+                                           ; SOURCE LINE # 492
+000D 120000      R     LCALL   L?0155
+0010 5008              JNC     ?C0106
+0012 18                DEC     R0
+0013 742E              MOV     A,#02EH
+0015 F2                MOVX    @R0,A
+0016 08                INC     R0
+0017 74E0              MOV     A,#0E0H
+0019 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 493
+001A         ?C0106:
+001A 22                RET     
+             ; FUNCTION _CHARGE_DecMpptRegVoltage (END)
+
+             ; FUNCTION _CHARGE_SetRegulate (BEGIN)
+                                           ; SOURCE LINE # 496
+                                           ; SOURCE LINE # 497
+                                           ; SOURCE LINE # 498
+0000 300015            JNB     en,?C0107
+                                           ; SOURCE LINE # 500
+0003 7800        R     MOV     R0,#LOW chargeSolarRegMv
+0005 E2                MOVX    A,@R0
+0006 FE                MOV     R6,A
+0007 08                INC     R0
+0008 E2                MOVX    A,@R0
+0009 FF                MOV     R7,A
+000A 120000      E     LCALL   _BUCK_SetSolarVoltage
+                                           ; SOURCE LINE # 501
+000D 120000      R     LCALL   L?0152
+0010 120000      E     LCALL   _BUCK_SetBattVoltage
+                                           ; SOURCE LINE # 502
+0013 D200        E     SETB    ?BUCK_EnableBatteryLimit?BIT
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 32  
+
+0015 120000      E     LCALL   BUCK_EnableBatteryLimit
+                                           ; SOURCE LINE # 503
+0018         ?C0107:
+                                           ; SOURCE LINE # 504
+0018 A200        R     MOV     C,en
+001A 9200        E     MOV     ?BUCK_EnableRegulate?BIT,C
+001C 120000      E     LCALL   BUCK_EnableRegulate
+                                           ; SOURCE LINE # 505
+001F A200        R     MOV     C,en
+0021 9200        R     MOV     chargeMpptEnable,C
+                                           ; SOURCE LINE # 506
+0023 22                RET     
+             ; FUNCTION _CHARGE_SetRegulate (END)
+
+             ; FUNCTION _CHARGE_AdjustCompBattV (BEGIN)
+                                           ; SOURCE LINE # 509
+                                           ; SOURCE LINE # 510
+                                           ; SOURCE LINE # 511
+0000 120000      R     LCALL   L?0153
+0003 7800        E     MOV     R0,#LOW buckBattRegMv+01H
+0005 66                XRL     A,@R0
+0006 7003              JNZ     ?C0117
+0008 EE                MOV     A,R6
+0009 18                DEC     R0
+000A 66                XRL     A,@R0
+000B         ?C0117:
+000B 6003              JZ      ?C0110
+                                           ; SOURCE LINE # 512
+000D 120000      E     LCALL   _BUCK_SetBattVoltage
+                                           ; SOURCE LINE # 513
+                                           ; SOURCE LINE # 514
+0010         ?C0110:
+0010 22                RET     
+             ; FUNCTION _CHARGE_AdjustCompBattV (END)
+
+             ; FUNCTION __CHARGE_StartScan (BEGIN)
+                                           ; SOURCE LINE # 517
+;---- Variable 'highMv' assigned to Register 'R4/R5' ----
+;---- Variable 'lowMv' assigned to Register 'R6/R7' ----
+                                           ; SOURCE LINE # 518
+                                           ; SOURCE LINE # 519
+0000 D200        R     SETB    chargeMpptScanEnable
+                                           ; SOURCE LINE # 520
+0002 7800        R     MOV     R0,#LOW chargeScanEndMv
+0004 EE                MOV     A,R6
+0005 F2                MOVX    @R0,A
+0006 08                INC     R0
+0007 EF                MOV     A,R7
+0008 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 521
+0009 08                INC     R0
+000A EC                MOV     A,R4
+000B F2                MOVX    @R0,A
+000C 08                INC     R0
+000D ED                MOV     A,R5
+000E F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 522
+000F E4                CLR     A
+0010 7800        R     MOV     R0,#LOW chargeMaxPower
+0012 F2                MOVX    @R0,A
+0013 08                INC     R0
+0014 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 523
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 33  
+
+0015 C200        R     CLR     chargeMpptEnable
+                                           ; SOURCE LINE # 524
+0017 AE04              MOV     R6,AR4
+0019 AF05              MOV     R7,AR5
+001B 120000      E     LCALL   _BUCK_SetSolarVoltage
+                                           ; SOURCE LINE # 525
+001E C200        E     CLR     ?BUCK_EnableBatteryLimit?BIT
+0020 120000      E     LCALL   BUCK_EnableBatteryLimit
+                                           ; SOURCE LINE # 526
+0023 D200        E     SETB    ?BUCK_EnableRegulate?BIT
+0025 020000      E     LJMP    BUCK_EnableRegulate
+             ; FUNCTION __CHARGE_StartScan (END)
+
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 34  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+SPI0CKR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A2H  1
+uint16_t . . . . . . . . . . . . . . .  TYPEDEF  -----  U_INT    -----  2
+P0 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0080H  1
+PSW_OV . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D2H  1
+XOSC0CN. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B1H  1
+P1 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0090H  1
+TEMP_CurTempC10. . . . . . . . . . . .  EXTERN   PDATA  INT      -----  2
+P2 . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A0H  1
+uint64_t . . . . . . . . . . . . . . .  TYPEDEF  -----  ARRAY    -----  8
+solarPowerUw . . . . . . . . . . . . .  PUBLIC   PDATA  U_LONG   0005H  4
+ADC0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0097H  1
+SI_GEN_PTR_t . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  3
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  3
+  gptr . . . . . . . . . . . . . . . .  MEMBER   -----  STRUCT   0000H  3
+SMB0CN0_MASTER . . . . . . . . . . . .  ABSBIT   -----  BIT      00C7H  1
+PCA0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00F9H  2
+RTC0KEY. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AEH  1
+EIE1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E6H  1
+__CHARGE_StartScan . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  lowMv. . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0006H  2
+  highMv . . . . . . . . . . . . . . .  * REG *  DATA   U_INT    0004H  2
+_CHARGE_ComputeChargeCurrent . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  t. . . . . . . . . . . . . . . . . .  AUTO     PDATA  LONG     0000H  4
+SMB0CN0_ACK. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C1H  1
+EIE2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E7H  1
+int32_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  LONG     -----  4
+TEMP_compFloatMv . . . . . . . . . . .  EXTERN   PDATA  U_INT    -----  2
+PSCTL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008FH  1
+IT01CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E4H  1
+CS0CN0 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B0H  1
+int16_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  INT      -----  2
+SMB0CN0_TXMODE . . . . . . . . . . . .  ABSBIT   -----  BIT      00C6H  1
+DERIVID. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E3H  1
+CS0MD1 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AFH  1
+SFRPAGE. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A7H  1
+CS0MD2 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F3H  1
+P0MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A4H  1
+CS0MD3 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F3H  1
+int64_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  ARRAY    -----  8
+P1MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A5H  1
+SI_UU32. . . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  4
+  u32. . . . . . . . . . . . . . . . .  MEMBER   -----  U_LONG   0000H  4
+  s32. . . . . . . . . . . . . . . . .  MEMBER   -----  LONG     0000H  4
+  uu16 . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+v_s_mv . . . . . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0009H  2
+ADC0CN0_ADINT. . . . . . . . . . . . .  ABSBIT   -----  BIT      00EDH  1
+TMR2RLH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CBH  1
+P2MDOUT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A6H  1
+IE . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A8H  1
+false. . . . . . . . . . . . . . . . .  E_CONST  -----  U_CHAR   -----  1
+POWER_enableAtNight. . . . . . . . . .  EXTERN   DATA   BIT      -----  1
+TMR3RLH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0093H  1
+SI_UU16. . . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  2
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  U_INT    0000H  2
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 35  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  INT      0000H  2
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+EIP1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F6H  1
+BUCK_EnableRegulate. . . . . . . . . .  EXTERN   CODE   PROC     -----  -----
+_BUCK_SetSolarVoltage. . . . . . . . .  EXTERN   CODE   PROC     -----  -----
+EIP2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F7H  1
+SCON0_RB8. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009AH  1
+TMR2RLL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CAH  1
+PCA0CPH0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FCH  1
+TMR3RLL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0092H  1
+PCA0CPH1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EAH  1
+GPTR_t . . . . . . . . . . . . . . . .  TYPEDEF  -----  STRUCT   -----  3
+  memtype. . . . . . . . . . . . . . .  MEMBER   -----  U_CHAR   0000H  1
+  address. . . . . . . . . . . . . . .  MEMBER   -----  UNION    0001H  2
+SCON0_TB8. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009BH  1
+CS0CN0_CSEN. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B7H  1
+B_B0 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F0H  1
+DP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0082H  2
+PCA0CPH2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ECH  1
+B_B1 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F1H  1
+ADC0GT . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00C3H  2
+_CHARGE_DecMpptRegVoltage. . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+B_B2 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F2H  1
+PCA0CPL0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FBH  1
+B_B3 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F3H  1
+PCA0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D9H  1
+PCA0CPM0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DAH  1
+PCA0CPL1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E9H  1
+CHARGE_MpptUpdate. . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  lastPowerMw. . . . . . . . . . . . .  STATIC   PDATA  U_INT    0000H  2
+  lastSolarMv. . . . . . . . . . . . .  STATIC   PDATA  U_INT    0002H  2
+  deltaVpos. . . . . . . . . . . . . .  AUTO     DATA   BIT      0000H  1
+B_B4 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F4H  1
+PCA0CPM1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DBH  1
+PCA0CPL2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EBH  1
+B_B5 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F5H  1
+PCA0CPM2 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DCH  1
+IP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B8H  1
+ADC0TK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BCH  1
+_BUCK_SetBattVoltage . . . . . . . . .  EXTERN   CODE   PROC     -----  -----
+buckBattRegMv. . . . . . . . . . . . .  EXTERN   IDATA  U_INT    -----  2
+B_B6 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F6H  1
+ADC0LT . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00C5H  2
+IREF0CN0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D6H  1
+_SMB_SetStatusBit. . . . . . . . . . .  EXTERN   CODE   PROC     -----  -----
+SCON0_MCE. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009DH  1
+B_B7 . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00F7H  1
+XBR0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E1H  1
+SMB0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C1H  1
+XBR1 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E2H  1
+CS0SCAN0 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D2H  1
+__CHARGE_SetState. . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  newSt. . . . . . . . . . . . . . . .  * REG *  DATA   U_CHAR   0007H  1
+TEMP_compBulkMv. . . . . . . . . . . .  EXTERN   PDATA  U_INT    -----  2
+SMB0CN0_STA. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C5H  1
+XBR2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E3H  1
+CS0SCAN1 . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D3H  1
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 36  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+ADC0MX . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0096H  1
+ACC_ACC0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E0H  1
+REF0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D1H  1
+HFO0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B2H  1
+CKCON0 . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008EH  1
+ACC_ACC1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E1H  1
+REG0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C9H  1
+CRC0IN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0085H  1
+TMR2CN0_TR2. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CAH  1
+ACC_ACC2 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E2H  1
+CHARGE_Init. . . . . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+ACC_ACC3 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E3H  1
+SP . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0081H  1
+CMP0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009DH  1
+_CHARGE_IncMpptRegVoltage. . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+ACC_ACC4 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E4H  1
+_BUCK_GetEfficiency. . . . . . . . . .  EXTERN   CODE   PROC     -----  -----
+PCA0CN0_CCF0 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D8H  1
+ACC_ACC5 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E5H  1
+PCA0CN0_CCF1 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D9H  1
+ACC_ACC6 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E6H  1
+TMR2 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00CCH  2
+chargeMaxPower . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    000BH  2
+PCA0CN0_CCF2 . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DAH  1
+ACC_ACC7 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00E7H  1
+TMR3 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0094H  2
+CS0CN0_CSCMPF. . . . . . . . . . . . .  ABSBIT   -----  BIT      00B0H  1
+SMB0CN0_ACKRQ. . . . . . . . . . . . .  ABSBIT   -----  BIT      00C3H  1
+VDM0CN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FFH  1
+P0MDIN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F1H  1
+PARAM_battIsLeadAcid . . . . . . . . .  EXTERN   DATA   BIT      -----  1
+SCON0_REN. . . . . . . . . . . . . . .  ABSBIT   -----  BIT      009CH  1
+P1MDIN . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F2H  1
+CS0THH . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FEH  1
+SMB0CN0_STO. . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C4H  1
+PMU0CF . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B5H  1
+chargeAbsTermCount . . . . . . . . . .  PUBLIC   PDATA  U_CHAR   000DH  1
+P0MASK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C7H  1
+bool . . . . . . . . . . . . . . . . .  TYPEDEF  DATA   BIT      -----  1
+P1MASK . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BFH  1
+SI_GEN_PTR . . . . . . . . . . . . . .  * TAG *  -----  UNION    -----  3
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  3
+  gptr . . . . . . . . . . . . . . . .  MEMBER   -----  STRUCT   0000H  3
+CS0THL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FDH  1
+PSW_RS0. . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D3H  1
+PCA0CN0_CF . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DFH  1
+SPI0CN0_RXOVRN . . . . . . . . . . . .  ABSBIT   -----  BIT      00FCH  1
+PSW_RS1. . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D4H  1
+PARAM_GetFloatMv . . . . . . . . . . .  EXTERN   CODE   PROC     -----  -----
+TMR2CN0_T2XCLK0. . . . . . . . . . . .  ABSBIT   -----  BIT      00C8H  1
+BUCK_EnableBatteryLimit. . . . . . . .  EXTERN   CODE   PROC     -----  -----
+TMR2CN0_T2XCLK1. . . . . . . . . . . .  ABSBIT   -----  BIT      00C9H  1
+ADC0CN0_ADEN . . . . . . . . . . . . .  ABSBIT   -----  BIT      00EFH  1
+TMOD . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0089H  1
+TCON . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0088H  1
+PMU0MD . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B5H  1
+PMU0FL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CEH  1
+CRC0FLIP . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009CH  1
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 37  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+chargeCompThreshMv . . . . . . . . . .  PUBLIC   PDATA  U_INT    000EH  2
+PSW_PARITY . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D0H  1
+IE_ES0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ACH  1
+CMP0MX . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009FH  1
+_SMB_SetIndexedValue . . . . . . . . .  EXTERN   CODE   PROC     -----  -----
+IE_ET0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A9H  1
+IE_ET1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ABH  1
+P0SKIP . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D4H  1
+IE_ET2 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00ADH  1
+P1SKIP . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D5H  1
+ADC0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E8H  1
+IE_EX0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A8H  1
+PCA0CN0_CR . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00DEH  1
+IE_EX1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AAH  1
+SCON0_SMODE. . . . . . . . . . . . . .  ABSBIT   -----  BIT      009FH  1
+CLKSEL . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A9H  1
+SPI0CN0_SPIEN. . . . . . . . . . . . .  ABSBIT   -----  BIT      00F8H  1
+B. . . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F0H  1
+ADC0H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BEH  1
+true . . . . . . . . . . . . . . . . .  E_CONST  -----  U_CHAR   -----  1
+CRC0AUTO . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009EH  1
+CS0CN0_CSBUSY. . . . . . . . . . . . .  ABSBIT   -----  BIT      00B4H  1
+ADC0CN0_ADBMEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00EEH  1
+TMR2RL . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00CAH  2
+ADC0L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BDH  1
+TMR3RL . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    0092H  2
+chargeLowProdCount . . . . . . . . . .  PUBLIC   PDATA  U_CHAR   0010H  1
+PCA0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D8H  1
+ACC. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E0H  1
+PCA0CP0. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00FBH  2
+PCA0CP1. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00E9H  2
+_ADC_GetValue. . . . . . . . . . . . .  EXTERN   CODE   PROC     -----  -----
+PCA0CP2. . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00EBH  2
+CRC0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0084H  1
+TH0. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008CH  1
+_SMB_SetStatusChargeState. . . . . . .  EXTERN   CODE   PROC     -----  -----
+IP_PS0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BCH  1
+TH1. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008DH  1
+PCA0H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00FAH  1
+IP_PT0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B9H  1
+IP_PT1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BBH  1
+uint8_t. . . . . . . . . . . . . . . .  TYPEDEF  -----  U_CHAR   -----  1
+SMB0CN0_ARBLOST. . . . . . . . . . . .  ABSBIT   -----  BIT      00C2H  1
+IP_PT2 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BDH  1
+TL0. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008AH  1
+CS0CF. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00AAH  1
+chargeMaxScanVSetpoint . . . . . . . .  PUBLIC   PDATA  U_INT    0011H  2
+SPI0CN0_TXBMT. . . . . . . . . . . . .  ABSBIT   -----  BIT      00F9H  1
+PSW_F0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D5H  1
+IE_ESPI0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AEH  1
+TL1. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008BH  1
+PCA0L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F9H  1
+_CHARGE_AdjustCompBattV. . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+SMB0CN0_SI . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00C0H  1
+PSW_F1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D1H  1
+P0_B0. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0080H  1
+IP_PX0 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B8H  1
+chargeScanEndMv. . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0013H  2
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 38  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+P1_B0. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0090H  1
+P0_B1. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0081H  1
+IP_PX1 . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BAH  1
+CS0DH. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EEH  1
+CMP0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009BH  1
+chargeTempLimited. . . . . . . . . . .  PUBLIC   DATA   BIT      0000H  1
+TCON_IE0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0089H  1
+P1_B1. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0091H  1
+P0_B2. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0082H  1
+TCON_IE1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008BH  1
+P1_B2. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0092H  1
+P0_B3. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0083H  1
+SMB0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C0H  1
+P1_B3. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0093H  1
+P0_B4. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0084H  1
+chargeSolarRegMv . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0015H  2
+P1_B4. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0094H  1
+P0_B5. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0085H  1
+CS0DL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EDH  1
+P1_B5. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0095H  1
+P0_B6. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0086H  1
+_CHARGE_SetRegulate. . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  en . . . . . . . . . . . . . . . . .  AUTO     DATA   BIT      0000H  1
+P1_B6. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0096H  1
+P0_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0087H  1
+int8_t . . . . . . . . . . . . . . . .  TYPEDEF  -----  CHAR     -----  1
+i_b_ma . . . . . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0017H  2
+P1_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0097H  1
+buckLimit1 . . . . . . . . . . . . . .  EXTERN   DATA   BIT      -----  1
+i_c_ma . . . . . . . . . . . . . . . .  PUBLIC   PDATA  INT      0019H  2
+P2_B7. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00A7H  1
+buckLimit2 . . . . . . . . . . . . . .  EXTERN   DATA   BIT      -----  1
+DPH. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0083H  1
+chargeMpptEnable . . . . . . . . . . .  PUBLIC   DATA   BIT      0001H  1
+ADC0GTH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C4H  1
+TMR2CN0_TF2H . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CFH  1
+TMR2CN0_T2SPLIT. . . . . . . . . . . .  ABSBIT   -----  BIT      00CBH  1
+_CHARGE_ComputePower . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  p. . . . . . . . . . . . . . . . . .  * REG *  DATA   U_LONG   0004H  4
+PSW_AC . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D6H  1
+SPI0CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F8H  1
+HFO0CAL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B3H  1
+CS0SE. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DEH  1
+TCON_TF0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008DH  1
+SCON0_RI . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0098H  1
+DPL. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0082H  1
+TCON_TF1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008FH  1
+SBUF0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0099H  1
+PCON0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0087H  1
+IREF0CF. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B9H  1
+ADC0GTL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C3H  1
+SI_UU32_t. . . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  4
+  u32. . . . . . . . . . . . . . . . .  MEMBER   -----  U_LONG   0000H  4
+  s32. . . . . . . . . . . . . . . . .  MEMBER   -----  LONG     0000H  4
+  uu16 . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 39  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  4
+TMR2CN0_TF2L . . . . . . . . . . . . .  ABSBIT   -----  BIT      00CEH  1
+SCON0_TI . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0099H  1
+ADC0CN0_ADCM0. . . . . . . . . . . . .  ABSBIT   -----  BIT      00E8H  1
+ADC0LTH. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C6H  1
+TCON_IT0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0088H  1
+CS0CN0_CSPME . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B1H  1
+ADC0CN0_ADCM1. . . . . . . . . . . . .  ABSBIT   -----  BIT      00E9H  1
+RSTSRC . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00EFH  1
+P0MAT. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D7H  1
+CRC0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0086H  1
+SI_UU16_t. . . . . . . . . . . . . . .  TYPEDEF  -----  UNION    -----  2
+  u16. . . . . . . . . . . . . . . . .  MEMBER   -----  U_INT    0000H  2
+  s16. . . . . . . . . . . . . . . . .  MEMBER   -----  INT      0000H  2
+  u8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+  s8 . . . . . . . . . . . . . . . . .  MEMBER   -----  ARRAY    0000H  2
+TCON_IT1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008AH  1
+ADC0CN0_ADCM2. . . . . . . . . . . . .  ABSBIT   -----  BIT      00EAH  1
+SCON0. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0098H  1
+P1MAT. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CFH  1
+CS0PM. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DEH  1
+chargeMpptScanEnable . . . . . . . . .  PUBLIC   DATA   BIT      0002H  1
+ADC0CN0_ADWINT . . . . . . . . . . . .  ABSBIT   -----  BIT      00EBH  1
+ADC0CN0_ADBUSY . . . . . . . . . . . .  ABSBIT   -----  BIT      00ECH  1
+SMB0ADM. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F5H  1
+ADC0LTL. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C5H  1
+chargeTimeoutCount . . . . . . . . . .  PUBLIC   PDATA  U_INT    001BH  2
+SPI0CN0_MODF . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FDH  1
+IP_PSPI0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00BEH  1
+CS0CN0_CSEOS . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B6H  1
+TMR2CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C8H  1
+TMR3CN0. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0091H  1
+i_s_ma . . . . . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    001DH  2
+SMB0ADR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00F4H  1
+TCON_TR0 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008CH  1
+CS0CN0_CSINT . . . . . . . . . . . . .  ABSBIT   -----  BIT      00B5H  1
+CS0MX. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ABH  1
+TMR2CN0_TF2CEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00CCH  1
+TCON_TR1 . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      008EH  1
+SMB0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00C2H  1
+P0DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0099H  1
+CS0SS. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DDH  1
+AUX. . . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      0080H  1
+TMR2H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CDH  1
+SPI0CFG. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A1H  1
+P1DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009BH  1
+TMR3H. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0095H  1
+P2DRV. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009DH  1
+CRC0CNT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   009AH  1
+buckEnable . . . . . . . . . . . . . .  EXTERN   DATA   BIT      -----  1
+chargeState. . . . . . . . . . . . . .  PUBLIC   PDATA  U_CHAR   001FH  1
+TMR2L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00CCH  1
+RTC0ADR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ACH  1
+SPI0CN0_SPIF . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FFH  1
+TMR3L. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   0094H  1
+ADC0PWR. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BBH  1
+IE_EA. . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00AFH  1
+RTC0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00ADH  1
+C51 COMPILER V9.60.0.0   CHARGE                                                            02/10/2023 13:46:29 PAGE 40  
+
+NAME                                    CLASS   MSPACE  TYPE    OFFSET  SIZE
+====                                    =====   ======  ====    ======  ====
+
+
+chargeMpptStepMv . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0020H  2
+CS0CN0_CSCMPEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00B3H  1
+FLSCL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B6H  1
+TMR2CN0_TF2LEN . . . . . . . . . . . .  ABSBIT   -----  BIT      00CDH  1
+SPI0CN0_WCOL . . . . . . . . . . . . .  ABSBIT   -----  BIT      00FEH  1
+SPI0CN0_NSSMD0 . . . . . . . . . . . .  ABSBIT   -----  BIT      00FAH  1
+PSW_CY . . . . . . . . . . . . . . . .  ABSBIT   -----  BIT      00D7H  1
+SPI0DAT. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00A3H  1
+buckCurVal . . . . . . . . . . . . . .  EXTERN   IDATA  U_INT    -----  2
+CHARGE_StateUpdate . . . . . . . . . .  PUBLIC   CODE   PROC     0000H  -----
+  b. . . . . . . . . . . . . . . . . .  AUTO     DATA   BIT      0000H  1
+  scanExitChargeState. . . . . . . . .  STATIC   PDATA  U_CHAR   0004H  1
+  t_c10. . . . . . . . . . . . . . . .  * REG *  DATA   INT      0006H  2
+SPI0CN0_NSSMD1 . . . . . . . . . . . .  ABSBIT   -----  BIT      00FBH  1
+ADC0 . . . . . . . . . . . . . . . . .  SFR      DATA   U_INT    00BDH  2
+TOFFH. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008EH  1
+solarPowerMw . . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0022H  2
+PSW. . . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00D0H  1
+PCA0PWM. . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00DFH  1
+REVID. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00E2H  1
+v_b_mv . . . . . . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0024H  2
+TOFFL. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   008DH  1
+FLKEY. . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00B7H  1
+uint32_t . . . . . . . . . . . . . . .  TYPEDEF  -----  U_LONG   -----  4
+chargeHighCount. . . . . . . . . . . .  PUBLIC   PDATA  U_INT    0026H  2
+ADC0AC . . . . . . . . . . . . . . . .  SFR      DATA   U_CHAR   00BAH  1
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   1668    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =     40       4
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =      3       3
+   EDATA SIZE       =   ----    ----
+   HDATA SIZE       =   ----    ----
+   XDATA CONST SIZE =   ----    ----
+   FAR CONST SIZE   =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
